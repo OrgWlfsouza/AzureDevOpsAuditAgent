@@ -2,7 +2,7 @@ using AzureDevOpsAuditAgent.Class;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// service azure devops
+// service azure devops - teste
 builder.Services.AddHttpClient<AzureDevOpsService>();
 builder.Services.AddControllers();
 
