@@ -78,6 +78,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: .net-app
+          path: ./myapp
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
