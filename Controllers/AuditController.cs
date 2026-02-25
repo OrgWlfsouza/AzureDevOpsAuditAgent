@@ -32,5 +32,20 @@ public class AuditController : ControllerBase
         var license = await _service.GetUserLicenseAsync(email);
         return Ok(new { User = email, License = license });
     }
+
+    [HttpGet("projects/{projectId}/admins")]
+    public async Task<IActionResult> GetProjectAdministrators(string projectId)
+    {
+        var admins = await _service.GetProjectAdministratorsAsync(projectId);
+        return Ok(new { Project = projectId, Administrators = admins });
+    }
+
+    [HttpGet("projects/{projectId}/admins/resolved")]
+    public async Task<IActionResult> GetProjectAdministratorsResolved(string projectId)
+    {
+        var admins = await _service.GetProjectAdministratorsResolvedAsync(projectId);
+        return Ok(new { Project = projectId, Administrators = admins });
+    }
 }
+
 
