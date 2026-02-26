@@ -14,7 +14,7 @@ public class AuditController : ControllerBase
 
     [HttpGet("projects/count")]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ProjectCountResponse))]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ProblemDetails))]
     public async Task<IActionResult> GetProjectCount()
     {
         var count = await _service.GetProjectCountAsync();
@@ -23,7 +23,7 @@ public class AuditController : ControllerBase
 
     [HttpGet("users/count")]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(UserCountResponse))]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ProblemDetails))]
     public async Task<IActionResult> GetUserCount()
     {
         var count = await _service.GetUserCountAsync();
@@ -32,7 +32,7 @@ public class AuditController : ControllerBase
 
     [HttpGet("users/license/{email}")]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(UserLicenseResponse))]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ProblemDetails))]
     public async Task<IActionResult> GetUserLicense(string email)
     {
         var license = await _service.GetUserLicenseAsync(email);
@@ -41,7 +41,7 @@ public class AuditController : ControllerBase
 
     [HttpGet("projects/{projectId}/admins")]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ProjectAdminsResponse))]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ProblemDetails))]
     public async Task<IActionResult> GetProjectAdministrators(string projectId)
     {
         var admins = await _service.GetProjectAdministratorsAsync(projectId);
@@ -50,7 +50,7 @@ public class AuditController : ControllerBase
 
     [HttpGet("projects/{projectId}/admins/resolved")]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ProjectAdminsResponse))]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ProblemDetails))]
     public async Task<IActionResult> GetProjectAdministratorsResolved(string projectId)
     {
         var admins = await _service.GetProjectAdministratorsResolvedAsync(projectId);
