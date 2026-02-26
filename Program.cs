@@ -20,16 +20,13 @@ builder.Services.AddSwaggerGen(options =>
 
 var app = builder.Build();
 
-// Habilitar middleware do Swagger
-if (app.Environment.IsDevelopment())
+// Habilitar Swagger em todos os ambientes (remover o if)
+app.UseSwagger();
+app.UseSwaggerUI(options =>
 {
-    app.UseSwagger();
-    app.UseSwaggerUI(options =>
-    {
-        options.SwaggerEndpoint("/swagger/v1/swagger.json", "Azure DevOps Audit Agent API v1");
-        options.RoutePrefix = string.Empty; // Swagger na raiz (https://localhost:xxxx/)
-    });
-}
+    options.SwaggerEndpoint("/swagger/v1/swagger.json", "Azure DevOps Audit Agent API v1");
+    options.RoutePrefix = string.Empty; // Swagger na raiz
+});
 
 app.MapControllers();
 app.Run();
