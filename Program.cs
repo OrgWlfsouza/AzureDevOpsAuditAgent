@@ -1,6 +1,5 @@
 using AzureDevOpsAuditAgent.Class;
 using Microsoft.OpenApi;
-using Microsoft.OpenApi.Models; // ✅ ajuste aqui
 using Swashbuckle.AspNetCore.SwaggerGen;
 
 var builder = WebApplication.CreateBuilder(args);
