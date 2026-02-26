@@ -1,6 +1,7 @@
 using AzureDevOpsAuditAgent.Class;
 using Microsoft.OpenApi;
 using Swashbuckle.AspNetCore.SwaggerGen;
+using System.Reflection;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -8,48 +9,67 @@ builder.Services.AddHttpClient<AzureDevOpsService>();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
-// Adicionar Swagger
+// Adicionar Swagger com configuração avançada
 builder.Services.AddSwaggerGen(options =>
 {
     options.SwaggerDoc("v1", new OpenApiInfo
     {
         Version = "v1",
         Title = "Azure DevOps Audit Agent API",
-        Description = "API para auditoria do Azure DevOps",
+        Description = "API para auditoria e consulta de informações do Azure DevOps",
+        Contact = new OpenApiContact
+        {
+            Name = "Suporte",
+            Email = "suporte@exemplo.com"
+        }
     });
 
+    // Adicionar comentários XML para documentação enriquecida
+    var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    if (File.Exists(xmlPath))
+    {
+        options.IncludeXmlComments(xmlPath);
+    }
+
+    // Gerar Operation IDs baseados no nome do método
     options.CustomOperationIds(apiDesc =>
-        apiDesc.TryGetMethodInfo(out var methodInfo) ? methodInfo.Name : null);
+    {
+        return apiDesc.TryGetMethodInfo(out MethodInfo methodInfo)
+            ? methodInfo.Name
+            : null;
+    });
 
-    // ✅ Garante que ProblemDetails apareça nos schemas
-    options.SupportNonNullableReferenceTypes();
+    // Configurar servidores
+    options.AddServer(new OpenApiServer
+    {
+        Url = "https://azuredevopsauditagent.azurewebsites.net",
+        Description = "Servidor de Produção"
+    });
+
+    options.AddServer(new OpenApiServer
+    {
+        Url = "https://localhost:5001",
+        Description = "Servidor de Desenvolvimento (HTTPS)"
+    });
+
+    options.AddServer(new OpenApiServer
+    {
+        Url = "http://localhost:5000",
+        Description = "Servidor de Desenvolvimento (HTTP)"
+    });
 });
-
 
 var app = builder.Build();
 
-// Middleware para responder HEAD em /swagger/v1/swagger.json
-app.Use(async (context, next) =>
-{
-    if (context.Request.Path.StartsWithSegments("/swagger/v1/swagger.json") &&
-        context.Request.Method.Equals("HEAD", StringComparison.OrdinalIgnoreCase))
-    {
-        context.Response.StatusCode = StatusCodes.Status200OK;
-        return;
-    }
-    await next();
-});
-
-// Habilitar Swagger em todos os ambientes
-app.UseSwagger(c =>
-{
-    c.RouteTemplate = "swagger/{documentName}/swagger.json"; // ✅ garante o caminho correto
-});
-
+// Habilitar Swagger em todos os ambientes (remova o if para produção)
+app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
     options.SwaggerEndpoint("/swagger/v1/swagger.json", "Azure DevOps Audit Agent API v1");
-    options.RoutePrefix = string.Empty; // Swagger UI na raiz
+    options.RoutePrefix = string.Empty; // Swagger na raiz
+    options.DisplayOperationId(); // Exibir Operation IDs na UI
+    options.DisplayRequestDuration(); // Exibir duração das requisições
 });
 
 app.MapControllers();
