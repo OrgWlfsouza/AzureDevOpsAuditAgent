@@ -18,10 +18,13 @@ builder.Services.AddSwaggerGen(options =>
         Description = "API para auditoria do Azure DevOps",
     });
 
-    // ✅ Garante que cada endpoint tenha operationId baseado no nome do método
     options.CustomOperationIds(apiDesc =>
         apiDesc.TryGetMethodInfo(out var methodInfo) ? methodInfo.Name : null);
+
+    // ✅ Garante que ProblemDetails apareça nos schemas
+    options.SupportNonNullableReferenceTypes();
 });
+
 
 var app = builder.Build();
 
