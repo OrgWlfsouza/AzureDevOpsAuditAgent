@@ -1,5 +1,6 @@
 using AzureDevOpsAuditAgent.Class;
 using Microsoft.OpenApi;
+using Swashbuckle.AspNetCore.SwaggerGen;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,7 +17,12 @@ builder.Services.AddSwaggerGen(options =>
         Title = "Azure DevOps Audit Agent API",
         Description = "API para auditoria do Azure DevOps",
     });
+
+    // ✅ Garante que cada endpoint tenha operationId baseado no nome do método
+    options.CustomOperationIds(apiDesc =>
+        apiDesc.TryGetMethodInfo(out var methodInfo) ? methodInfo.Name : null);
 });
+
 
 var app = builder.Build();
 
