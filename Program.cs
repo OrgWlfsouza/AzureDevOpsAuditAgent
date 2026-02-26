@@ -13,7 +13,7 @@ builder.Services.AddSwaggerGen(options =>
     options.SwaggerDoc("v1", new OpenApiInfo
     {
         Version = "v1",
-        Title = "Azure DevOps Audit Agent API",
+        Title = "Azure DevOps Audit Agent API - Criado por Wagner Souza",
         Description = "API para auditoria do Azure DevOps",
     });
 });
