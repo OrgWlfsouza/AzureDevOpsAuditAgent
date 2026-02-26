@@ -63,7 +63,3 @@ jobs:
           app-name: 'AuditDevOps'
           slot-name: 'Production'
           package: .
-       environment:
-          url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
-
-
