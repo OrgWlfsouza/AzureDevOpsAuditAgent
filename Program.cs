@@ -1,5 +1,6 @@
 using AzureDevOpsAuditAgent.Class;
 using Microsoft.OpenApi;
+using Microsoft.OpenApi.Models; // ✅ ajuste aqui
 using Swashbuckle.AspNetCore.SwaggerGen;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -23,15 +24,30 @@ builder.Services.AddSwaggerGen(options =>
         apiDesc.TryGetMethodInfo(out var methodInfo) ? methodInfo.Name : null);
 });
 
-
 var app = builder.Build();
 
-// Habilitar Swagger em todos os ambientes (remover o if)
-app.UseSwagger();
+// Middleware para responder HEAD em /swagger/v1/swagger.json
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/swagger/v1/swagger.json") &&
+        context.Request.Method.Equals("HEAD", StringComparison.OrdinalIgnoreCase))
+    {
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        return;
+    }
+    await next();
+});
+
+// Habilitar Swagger em todos os ambientes
+app.UseSwagger(c =>
+{
+    c.RouteTemplate = "swagger/{documentName}/swagger.json"; // ✅ garante o caminho correto
+});
+
 app.UseSwaggerUI(options =>
 {
     options.SwaggerEndpoint("/swagger/v1/swagger.json", "Azure DevOps Audit Agent API v1");
-    options.RoutePrefix = string.Empty; // Swagger na raiz
+    options.RoutePrefix = string.Empty; // Swagger UI na raiz
 });
 
 app.MapControllers();
