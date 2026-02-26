@@ -41,9 +41,7 @@ jobs:
     permissions:
       id-token: write #This is required for requesting the JWT
       contents: read #This is required for actions/checkout
-    environment:
-      name: 'Development'
-      url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+
 
     steps:
       - name: Download artifact from build job
@@ -65,5 +63,7 @@ jobs:
           app-name: 'AuditDevOps'
           slot-name: 'Production'
           package: .
-          
+       environment:
+          url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+
 
