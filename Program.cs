@@ -1,6 +1,8 @@
 using AzureDevOpsAuditAgent.Class;
 using Microsoft.OpenApi;
+using Microsoft.OpenApi.Models;
 using Swashbuckle.AspNetCore.SwaggerGen;
+using Swashbuckle.AspNetCore.Annotations;
 using System.Reflection;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -12,6 +14,9 @@ builder.Services.AddEndpointsApiExplorer();
 // Adicionar Swagger com configuração avançada
 builder.Services.AddSwaggerGen(options =>
 {
+    // Habilitar anotações do Swashbuckle
+    options.EnableAnnotations();
+
     options.SwaggerDoc("v1", new OpenApiInfo
     {
         Version = "v1",
@@ -40,29 +45,37 @@ builder.Services.AddSwaggerGen(options =>
             : null;
     });
 
-    // Configurar servidores
-    options.AddServer(new OpenApiServer
+    // Configurar servidor dinamicamente baseado no ambiente Azure
+    var websiteHostname = Environment.GetEnvironmentVariable("WEBSITE_HOSTNAME");
+    if (!string.IsNullOrEmpty(websiteHostname))
     {
-        Url = "https://azuredevopsauditagent.azurewebsites.net",
-        Description = "Servidor de Produção"
-    });
+        // Em produção no Azure App Service
+        options.AddServer(new OpenApiServer
+        {
+            Url = $"https://{websiteHostname}",
+            Description = "Servidor de Produção (Azure)"
+        });
+    }
+    else
+    {
+        // Em desenvolvimento local
+        options.AddServer(new OpenApiServer
+        {
+            Url = "https://localhost:5001",
+            Description = "Servidor de Desenvolvimento (HTTPS)"
+        });
 
-    options.AddServer(new OpenApiServer
-    {
-        Url = "https://localhost:5001",
-        Description = "Servidor de Desenvolvimento (HTTPS)"
-    });
-
-    options.AddServer(new OpenApiServer
-    {
-        Url = "http://localhost:5000",
-        Description = "Servidor de Desenvolvimento (HTTP)"
-    });
+        options.AddServer(new OpenApiServer
+        {
+            Url = "http://localhost:5000",
+            Description = "Servidor de Desenvolvimento (HTTP)"
+        });
+    }
 });
 
 var app = builder.Build();
 
-// Habilitar Swagger em todos os ambientes (remova o if para produção)
+// Habilitar Swagger em todos os ambientes
 app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
