@@ -61,13 +61,13 @@ builder.Services.AddSwaggerGen(options =>
         // Em desenvolvimento local
         options.AddServer(new OpenApiServer
         {
-            Url = "https://localhost:5001",
+            Url = "https://localhost:44377",
             Description = "Servidor de Desenvolvimento (HTTPS)"
         });
 
         options.AddServer(new OpenApiServer
         {
-            Url = "http://localhost:5000",
+            Url = "http://localhost:44377",
             Description = "Servidor de Desenvolvimento (HTTP)"
         });
     }
