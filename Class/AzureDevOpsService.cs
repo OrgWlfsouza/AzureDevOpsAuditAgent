@@ -403,6 +403,140 @@ namespace AzureDevOpsAuditAgent.Class
             return members;
         }
 
+        /// <summary>
+        /// Lista todos os projetos da organização Azure DevOps
+        /// </summary>
+        /// <param name="stateFilter">Filtro de estado: 'all', 'wellFormed', 'createPending', 'deleting', 'new' ou 'unchanged'</param>
+        /// <param name="top">Número máximo de projetos a retornar</param>
+        /// <param name="skip">Número de projetos a pular (para paginação)</param>
+        /// <returns>Lista de projetos</returns>
+        public async Task<ProjectsResponse> GetProjectsAsync(string stateFilter = "wellFormed", int? top = null, int? skip = null)
+        {
+            var url = $"https://dev.azure.com/{_organization}/_apis/projects?stateFilter={stateFilter}&api-version=7.0";
+            
+            if (top.HasValue)
+            {
+                url += $"&$top={top.Value}";
+            }
+            
+            if (skip.HasValue)
+            {
+                url += $"&$skip={skip.Value}";
+            }
+
+            var httpResponse = await _httpClient.GetAsync(url);
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                throw new HttpRequestException(
+                    $"Erro ao listar projetos. Status: {httpResponse.StatusCode}. Detalhes: {errorContent}");
+            }
+
+            var response = await httpResponse.Content.ReadAsStringAsync();
+            var json = JObject.Parse(response);
+
+            var projects = new List<AzureDevOpsProject>();
+
+            if (json["value"] != null)
+            {
+                foreach (var project in json["value"])
+                {
+                    projects.Add(new AzureDevOpsProject
+                    {
+                        Id = project["id"]?.ToString(),
+                        Name = project["name"]?.ToString(),
+                        Description = project["description"]?.ToString(),
+                        Url = project["url"]?.ToString(),
+                        State = project["state"]?.ToString(),
+                        Revision = project["revision"]?.ToObject<int>() ?? 0,
+                        Visibility = project["visibility"]?.ToString(),
+                        LastUpdateTime = project["lastUpdateTime"]?.ToObject<DateTime>() ?? DateTime.MinValue
+                    });
+                }
+            }
+
+            return new ProjectsResponse
+            {
+                Count = json["count"]?.ToObject<int>() ?? projects.Count,
+                Projects = projects
+            };
+        }
+
+        /// <summary>
+        /// Obtém detalhes de um projeto específico pelo ID ou nome
+        /// </summary>
+        /// <param name="projectIdOrName">ID ou nome do projeto</param>
+        /// <param name="includeCapabilities">Incluir informações de capacidades do projeto</param>
+        /// <param name="includeHistory">Incluir histórico do projeto</param>
+        /// <returns>Detalhes do projeto</returns>
+        public async Task<AzureDevOpsProjectDetails> GetProjectDetailsAsync(
+            string projectIdOrName, 
+            bool includeCapabilities = false, 
+            bool includeHistory = false)
+        {
+            var url = $"https://dev.azure.com/{_organization}/_apis/projects/{projectIdOrName}?api-version=7.0";
+            
+            if (includeCapabilities)
+            {
+                url += "&includeCapabilities=true";
+            }
+            
+            if (includeHistory)
+            {
+                url += "&includeHistory=true";
+            }
+
+            var httpResponse = await _httpClient.GetAsync(url);
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                throw new HttpRequestException(
+                    $"Erro ao obter detalhes do projeto '{projectIdOrName}'. Status: {httpResponse.StatusCode}. Detalhes: {errorContent}");
+            }
+
+            var response = await httpResponse.Content.ReadAsStringAsync();
+            var json = JObject.Parse(response);
+
+            var projectDetails = new AzureDevOpsProjectDetails
+            {
+                Id = json["id"]?.ToString(),
+                Name = json["name"]?.ToString(),
+                Description = json["description"]?.ToString(),
+                Url = json["url"]?.ToString(),
+                State = json["state"]?.ToString(),
+                Revision = json["revision"]?.ToObject<int>() ?? 0,
+                Visibility = json["visibility"]?.ToString(),
+                LastUpdateTime = json["lastUpdateTime"]?.ToObject<DateTime>() ?? DateTime.MinValue,
+                DefaultTeamImageUrl = json["defaultTeamImageUrl"]?.ToString()
+            };
+
+            // Processar capabilities se disponível
+            if (json["capabilities"] != null)
+            {
+                var capabilities = new Dictionary<string, Dictionary<string, string>>();
+                
+                foreach (var capability in json["capabilities"])
+                {
+                    var capProp = (JProperty)capability;
+                    var capDict = new Dictionary<string, string>();
+                    
+                    foreach (var item in capProp.Value)
+                    {
+                        var itemProp = (JProperty)item;
+                        capDict[itemProp.Name] = itemProp.Value?.ToString() ?? string.Empty;
+                    }
+                    
+                    capabilities[capProp.Name] = capDict;
+                }
+                
+                projectDetails.Capabilities = capabilities;
+            }
+
+            return projectDetails;
+        }
+
         #endregion
     }
 
@@ -584,6 +718,84 @@ namespace AzureDevOpsAuditAgent.Class
         /// Descriptor do container (grupo)
         /// </summary>
         public string? ContainerDescriptor { get; set; }
+    }
+
+    /// <summary>
+    /// Resposta da listagem de projetos
+    /// </summary>
+    public class ProjectsResponse
+    {
+        /// <summary>
+        /// Número total de projetos retornados
+        /// </summary>
+        public int Count { get; set; }
+
+        /// <summary>
+        /// Lista de projetos
+        /// </summary>
+        public required List<AzureDevOpsProject> Projects { get; set; }
+    }
+
+    /// <summary>
+    /// Representa um projeto do Azure DevOps
+    /// </summary>
+    public class AzureDevOpsProject
+    {
+        /// <summary>
+        /// ID único do projeto (GUID)
+        /// </summary>
+        public string? Id { get; set; }
+
+        /// <summary>
+        /// Nome do projeto
+        /// </summary>
+        public string? Name { get; set; }
+
+        /// <summary>
+        /// Descrição do projeto
+        /// </summary>
+        public string? Description { get; set; }
+
+        /// <summary>
+        /// URL do projeto
+        /// </summary>
+        public string? Url { get; set; }
+
+        /// <summary>
+        /// Estado do projeto (wellFormed, createPending, deleting, new, unchanged)
+        /// </summary>
+        public string? State { get; set; }
+
+        /// <summary>
+        /// Número de revisão do projeto
+        /// </summary>
+        public int Revision { get; set; }
+
+        /// <summary>
+        /// Visibilidade do projeto (private, public)
+        /// </summary>
+        public string? Visibility { get; set; }
+
+        /// <summary>
+        /// Data/hora da última atualização do projeto
+        /// </summary>
+        public DateTime LastUpdateTime { get; set; }
+    }
+
+    /// <summary>
+    /// Representa detalhes completos de um projeto do Azure DevOps
+    /// </summary>
+    public class AzureDevOpsProjectDetails : AzureDevOpsProject
+    {
+        /// <summary>
+        /// URL da imagem do time padrão
+        /// </summary>
+        public string? DefaultTeamImageUrl { get; set; }
+
+        /// <summary>
+        /// Capacidades do projeto (versioncontrol, processTemplate, etc.)
+        /// </summary>
+        public Dictionary<string, Dictionary<string, string>>? Capabilities { get; set; }
     }
 
     #endregion
