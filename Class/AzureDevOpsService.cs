@@ -49,7 +49,7 @@ namespace AzureDevOpsAuditAgent.Class
 
         public async Task<List<string>> GetProjectAdministratorsAsync(string projectId)
         {
-            // Primeiro, obter o namespace de segurança
+            // Primeiro, obter o namespace de segurança para projetos
             var nsUrl = $"https://dev.azure.com/{_organization}/_apis/securitynamespaces?api-version=7.0";
             var nsResponse = await _httpClient.GetStringAsync(nsUrl);
             var nsJson = JObject.Parse(nsResponse);
@@ -62,23 +62,41 @@ namespace AzureDevOpsAuditAgent.Class
 
             var namespaceId = projectNamespace["namespaceId"].ToString();
 
-            // Agora, obter as permissões dos usuários no projeto
-            var aceUrl = $"https://dev.azure.com/{_organization}/_apis/accesscontrolentries/{namespaceId}?api-version=7.0";
-            var aceResponse = await _httpClient.GetStringAsync(aceUrl);
-            var aceJson = JObject.Parse(aceResponse);
+            // Obter o token de segurança do projeto
+            // O token para um projeto é: $PROJECT:{projectId}
+            var securityToken = $"$PROJECT:{projectId}";
+
+            // Usar o endpoint correto de Access Control Lists (ACLs) em vez de Access Control Entries
+            var aclUrl = $"https://dev.azure.com/{_organization}/_apis/accesscontrollists/{namespaceId}?token={securityToken}&api-version=7.0";
+            var aclResponse = await _httpClient.GetStringAsync(aclUrl);
+            var aclJson = JObject.Parse(aclResponse);
 
             var admins = new List<string>();
 
-            foreach (var entry in aceJson["value"])
+            if (aclJson["value"] != null && aclJson["value"].Any())
             {
-                var descriptor = entry["descriptor"]?.ToString();
-                var allowPermissions = entry["allow"]?.ToString();
-
-                // O valor da permissão de Project Administrator é específico (bitmask).
-                // Exemplo: 8192 pode representar "Administer project".
-                if (allowPermissions != null && allowPermissions.Contains("8192"))
+                foreach (var acl in aclJson["value"])
                 {
-                    admins.Add(descriptor);
+                    var acesDictionary = acl["acesDictionary"] as JObject;
+                    
+                    if (acesDictionary != null)
+                    {
+                        foreach (var kvp in acesDictionary)
+                        {
+                            var descriptor = kvp.Key;
+                            var ace = kvp.Value;
+                            
+                            // Verificar se tem permissões administrativas
+                            // Bit 15 (valor 32768) = GENERIC_MANAGE (administração do projeto)
+                            var allow = ace["allow"]?.Value<int>() ?? 0;
+                            
+                            // Permissão de administrador de projeto (GENERIC_MANAGE = 32768)
+                            if ((allow & 32768) != 0)
+                            {
+                                admins.Add(descriptor);
+                            }
+                        }
+                    }
                 }
             }
 
