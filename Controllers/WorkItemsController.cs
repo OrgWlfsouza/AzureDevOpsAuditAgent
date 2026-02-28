@@ -1,5 +1,6 @@
 using AzureDevOpsAuditAgent.Class;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
 
 namespace AzureDevOpsAuditAgent.Controllers
 {
@@ -71,10 +72,17 @@ namespace AzureDevOpsAuditAgent.Controllers
                     request.WorkItemType,
                     request.Project);
 
+                // Converter JsonElement para valores reais
+                var convertedFields = new Dictionary<string, object>();
+                foreach (var field in request.Fields)
+                {
+                    convertedFields[field.Key] = ConvertJsonElementToValue(field.Value);
+                }
+
                 var workItem = await _service.CreateWorkItemAsync(
                     request.Project,
                     request.WorkItemType,
-                    request.Fields);
+                    convertedFields);
 
                 return CreatedAtAction(
                     nameof(GetWorkItem),
@@ -338,7 +346,14 @@ namespace AzureDevOpsAuditAgent.Controllers
 
                 _logger.LogInformation("Atualizando Work Item {WorkItemId}", id);
 
-                var workItem = await _service.UpdateWorkItemAsync(id, request.Fields);
+                // Converter JsonElement para valores reais
+                var convertedFields = new Dictionary<string, object>();
+                foreach (var field in request.Fields)
+                {
+                    convertedFields[field.Key] = ConvertJsonElementToValue(field.Value);
+                }
+
+                var workItem = await _service.UpdateWorkItemAsync(id, convertedFields);
 
                 return Ok(workItem);
             }
@@ -430,6 +445,41 @@ namespace AzureDevOpsAuditAgent.Controllers
                     Status = StatusCodes.Status500InternalServerError
                 });
             }
+        }
+
+        private object ConvertJsonElementToValue(object value)
+        {
+            // Se já é um valor primitivo, retornar como está
+            if (value is string || value is int || value is long || 
+                value is double || value is float || value is bool || 
+                value is decimal || value == null)
+            {
+                return value;
+            }
+
+            // Se é JsonElement, extrair o valor real
+            if (value is JsonElement element)
+            {
+                return element.ValueKind switch
+                {
+                    JsonValueKind.String => element.GetString()!,
+                    JsonValueKind.Number => element.TryGetInt32(out var intVal) ? intVal : 
+                                          element.TryGetInt64(out var longVal) ? longVal : 
+                                          element.GetDouble(),
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.Null => null!,
+                    JsonValueKind.Array => element.EnumerateArray()
+                        .Select(e => ConvertJsonElementToValue(e))
+                        .ToList(),
+                    JsonValueKind.Object => element.EnumerateObject()
+                        .ToDictionary(p => p.Name, p => ConvertJsonElementToValue(p.Value)),
+                    _ => element.ToString()
+                };
+            }
+
+            // Para outros tipos, retornar como está
+            return value;
         }
     }
 

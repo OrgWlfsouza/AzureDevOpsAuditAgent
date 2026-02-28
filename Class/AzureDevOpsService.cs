@@ -1,6 +1,7 @@
 ﻿using Newtonsoft.Json.Linq;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 
 namespace AzureDevOpsAuditAgent.Class
 {
@@ -8,11 +9,13 @@ namespace AzureDevOpsAuditAgent.Class
     {
         private readonly HttpClient _httpClient;
         private readonly string _organization;
+        private readonly ILogger<AzureDevOpsService>? _logger;
 
-        public AzureDevOpsService(IConfiguration config, HttpClient httpClient)
+        public AzureDevOpsService(IConfiguration config, HttpClient httpClient, ILogger<AzureDevOpsService>? logger = null)
         {
             _httpClient = httpClient;
             _organization = config["AzureDevOps:Organization"];
+            _logger = logger;
             var pat = config["AzureDevOps:PAT"];
             var byteArray = System.Text.Encoding.ASCII.GetBytes($":{pat}");
             _httpClient.DefaultRequestHeaders.Authorization =
@@ -571,6 +574,12 @@ namespace AzureDevOpsAuditAgent.Class
             string workItemType,
             Dictionary<string, object> fields)
         {
+            // Validar que System.Title existe
+            if (!fields.ContainsKey("System.Title") || string.IsNullOrWhiteSpace(fields["System.Title"]?.ToString()))
+            {
+                throw new ArgumentException("O campo 'System.Title' é obrigatório para criar um Work Item.");
+            }
+
             var url = $"https://dev.azure.com/{_organization}/{projectIdOrName}/_apis/wit/workitems/${workItemType}?api-version=7.0";
 
             // Criar o payload no formato JSON Patch
@@ -588,15 +597,27 @@ namespace AzureDevOpsAuditAgent.Class
             var jsonContent = Newtonsoft.Json.JsonConvert.SerializeObject(patchDocument);
             var content = new StringContent(jsonContent, Encoding.UTF8, "application/json-patch+json");
 
+            // Log the request for debugging
+            _logger?.LogDebug("Creating Work Item - URL: {Url}, Payload: {Payload}", url, jsonContent);
+
             var httpResponse = await _httpClient.PostAsync(url, content);
 
             if (!httpResponse.IsSuccessStatusCode)
             {
                 var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                
+                // Log detalhes completos do erro
+                _logger?.LogError(
+                    "Erro ao criar Work Item. Status: {StatusCode}, URL: {Url}, Payload: {Payload}, Resposta: {Response}",
+                    httpResponse.StatusCode, url, jsonContent, errorContent);
+                
                 throw new HttpRequestException(
                     $"Erro ao criar Work Item. Status: {httpResponse.StatusCode}. " +
                     $"Detalhes: {errorContent}. " +
-                    $"Verifique se o PAT tem permissões de 'Work Items' (Read, Write & Manage).");
+                    $"Payload enviado: {jsonContent}. " +
+                    $"Verifique se: 1) O PAT tem permissões de 'Work Items' (Read, Write & Manage), " +
+                    $"2) O campo 'System.Title' está presente, " +
+                    $"3) O tipo de Work Item '{workItemType}' existe no projeto '{projectIdOrName}'.");
             }
 
             var response = await httpResponse.Content.ReadAsStringAsync();
