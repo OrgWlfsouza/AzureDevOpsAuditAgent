@@ -1,6 +1,7 @@
 ﻿using Newtonsoft.Json.Linq;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 
 namespace AzureDevOpsAuditAgent.Class
 {
@@ -8,11 +9,13 @@ namespace AzureDevOpsAuditAgent.Class
     {
         private readonly HttpClient _httpClient;
         private readonly string _organization;
+        private readonly ILogger<AzureDevOpsService>? _logger;
 
-        public AzureDevOpsService(IConfiguration config, HttpClient httpClient)
+        public AzureDevOpsService(IConfiguration config, HttpClient httpClient, ILogger<AzureDevOpsService>? logger = null)
         {
             _httpClient = httpClient;
             _organization = config["AzureDevOps:Organization"];
+            _logger = logger;
             var pat = config["AzureDevOps:PAT"];
             var byteArray = System.Text.Encoding.ASCII.GetBytes($":{pat}");
             _httpClient.DefaultRequestHeaders.Authorization =
@@ -556,6 +559,356 @@ namespace AzureDevOpsAuditAgent.Class
         }
 
         #endregion
+
+        #region Gerenciamento de Work Items
+
+        /// <summary>
+        /// Cria um novo Work Item em um projeto
+        /// </summary>
+        /// <param name="projectIdOrName">ID ou nome do projeto</param>
+        /// <param name="workItemType">Tipo do Work Item (Bug, Task, User Story, etc.)</param>
+        /// <param name="fields">Dicionário com os campos do Work Item</param>
+        /// <returns>Work Item criado</returns>
+        public async Task<WorkItem> CreateWorkItemAsync(
+            string projectIdOrName,
+            string workItemType,
+            Dictionary<string, object> fields)
+        {
+            // Validar que System.Title existe
+            if (!fields.ContainsKey("System.Title") || string.IsNullOrWhiteSpace(fields["System.Title"]?.ToString()))
+            {
+                throw new ArgumentException("O campo 'System.Title' é obrigatório para criar um Work Item.");
+            }
+
+            var url = $"https://dev.azure.com/{_organization}/{projectIdOrName}/_apis/wit/workitems/${workItemType}?api-version=7.0";
+
+            // Criar o payload no formato JSON Patch
+            var patchDocument = new List<object>();
+            foreach (var field in fields)
+            {
+                patchDocument.Add(new
+                {
+                    op = "add",
+                    path = $"/fields/{field.Key}",
+                    value = field.Value
+                });
+            }
+
+            var jsonContent = Newtonsoft.Json.JsonConvert.SerializeObject(patchDocument);
+            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json-patch+json");
+
+            // Log the request for debugging
+            _logger?.LogDebug("Creating Work Item - URL: {Url}, Payload: {Payload}", url, jsonContent);
+
+            var httpResponse = await _httpClient.PostAsync(url, content);
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                
+                // Log detalhes completos do erro
+                _logger?.LogError(
+                    "Erro ao criar Work Item. Status: {StatusCode}, URL: {Url}, Payload: {Payload}, Resposta: {Response}",
+                    httpResponse.StatusCode, url, jsonContent, errorContent);
+                
+                throw new HttpRequestException(
+                    $"Erro ao criar Work Item. Status: {httpResponse.StatusCode}. " +
+                    $"Detalhes: {errorContent}. " +
+                    $"Payload enviado: {jsonContent}. " +
+                    $"Verifique se: 1) O PAT tem permissões de 'Work Items' (Read, Write & Manage), " +
+                    $"2) O campo 'System.Title' está presente, " +
+                    $"3) O tipo de Work Item '{workItemType}' existe no projeto '{projectIdOrName}'.");
+            }
+
+            var response = await httpResponse.Content.ReadAsStringAsync();
+            var json = JObject.Parse(response);
+
+            return ParseWorkItem(json);
+        }
+
+        /// <summary>
+        /// Obtém um Work Item por ID
+        /// </summary>
+        /// <param name="workItemId">ID do Work Item</param>
+        /// <param name="fields">Lista de campos específicos a retornar (opcional)</param>
+        /// <param name="expand">Opções de expansão: None, Relations, Fields, Links, All</param>
+        /// <returns>Work Item encontrado</returns>
+        public async Task<WorkItem> GetWorkItemAsync(
+            int workItemId,
+            List<string>? fields = null,
+            string expand = "All")
+        {
+            var url = $"https://dev.azure.com/{_organization}/_apis/wit/workitems/{workItemId}?api-version=7.0";
+
+            if (fields != null && fields.Any())
+            {
+                url += $"&fields={string.Join(",", fields)}";
+            }
+
+            if (!string.IsNullOrEmpty(expand))
+            {
+                url += $"&$expand={expand}";
+            }
+
+            var httpResponse = await _httpClient.GetAsync(url);
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                throw new HttpRequestException(
+                    $"Erro ao obter Work Item {workItemId}. Status: {httpResponse.StatusCode}. " +
+                    $"Detalhes: {errorContent}");
+            }
+
+            var response = await httpResponse.Content.ReadAsStringAsync();
+            var json = JObject.Parse(response);
+
+            return ParseWorkItem(json);
+        }
+
+        /// <summary>
+        /// Obtém múltiplos Work Items por IDs
+        /// </summary>
+        /// <param name="workItemIds">Lista de IDs dos Work Items</param>
+        /// <param name="fields">Lista de campos específicos a retornar (opcional)</param>
+        /// <returns>Lista de Work Items</returns>
+        public async Task<List<WorkItem>> GetWorkItemsAsync(
+            List<int> workItemIds,
+            List<string>? fields = null)
+        {
+            if (!workItemIds.Any())
+                return new List<WorkItem>();
+
+            var url = $"https://dev.azure.com/{_organization}/_apis/wit/workitems?ids={string.Join(",", workItemIds)}&api-version=7.0";
+
+            if (fields != null && fields.Any())
+            {
+                url += $"&fields={string.Join(",", fields)}";
+            }
+
+            var httpResponse = await _httpClient.GetAsync(url);
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                throw new HttpRequestException(
+                    $"Erro ao obter Work Items. Status: {httpResponse.StatusCode}. " +
+                    $"Detalhes: {errorContent}");
+            }
+
+            var response = await httpResponse.Content.ReadAsStringAsync();
+            var json = JObject.Parse(response);
+
+            var workItems = new List<WorkItem>();
+
+            if (json["value"] != null)
+            {
+                foreach (var item in json["value"])
+                {
+                    workItems.Add(ParseWorkItem(item));
+                }
+            }
+
+            return workItems;
+        }
+
+        /// <summary>
+        /// Executa uma query WIQL (Work Item Query Language) para buscar Work Items
+        /// </summary>
+        /// <param name="projectIdOrName">ID ou nome do projeto</param>
+        /// <param name="wiql">Query WIQL</param>
+        /// <returns>Lista de Work Items encontrados</returns>
+        public async Task<WorkItemQueryResult> QueryWorkItemsAsync(string projectIdOrName, string wiql)
+        {
+            var url = $"https://dev.azure.com/{_organization}/{projectIdOrName}/_apis/wit/wiql?api-version=7.0";
+
+            var payload = new { query = wiql };
+            var jsonContent = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
+            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+            var httpResponse = await _httpClient.PostAsync(url, content);
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                throw new HttpRequestException(
+                    $"Erro ao executar query WIQL. Status: {httpResponse.StatusCode}. " +
+                    $"Detalhes: {errorContent}");
+            }
+
+            var response = await httpResponse.Content.ReadAsStringAsync();
+            var json = JObject.Parse(response);
+
+            var result = new WorkItemQueryResult
+            {
+                QueryType = json["queryType"]?.ToString(),
+                QueryResultType = json["queryResultType"]?.ToString(),
+                AsOf = json["asOf"]?.ToObject<DateTime>() ?? DateTime.MinValue,
+                WorkItemIds = new List<int>(),
+                WorkItems = new List<WorkItem>()
+            };
+
+            if (json["workItems"] != null)
+            {
+                foreach (var item in json["workItems"])
+                {
+                    var id = item["id"]?.ToObject<int>();
+                    if (id.HasValue)
+                    {
+                        result.WorkItemIds.Add(id.Value);
+                    }
+                }
+            }
+
+            // Se há IDs, buscar os Work Items completos
+            if (result.WorkItemIds.Any())
+            {
+                result.WorkItems = await GetWorkItemsAsync(result.WorkItemIds);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Atualiza um Work Item existente
+        /// </summary>
+        /// <param name="workItemId">ID do Work Item</param>
+        /// <param name="fields">Dicionário com os campos a atualizar</param>
+        /// <returns>Work Item atualizado</returns>
+        public async Task<WorkItem> UpdateWorkItemAsync(
+            int workItemId,
+            Dictionary<string, object> fields)
+        {
+            var url = $"https://dev.azure.com/{_organization}/_apis/wit/workitems/{workItemId}?api-version=7.0";
+
+            // Criar o payload no formato JSON Patch
+            var patchDocument = new List<object>();
+            foreach (var field in fields)
+            {
+                patchDocument.Add(new
+                {
+                    op = "replace",
+                    path = $"/fields/{field.Key}",
+                    value = field.Value
+                });
+            }
+
+            var jsonContent = Newtonsoft.Json.JsonConvert.SerializeObject(patchDocument);
+            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json-patch+json");
+
+            var httpResponse = await _httpClient.PatchAsync(url, content);
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                throw new HttpRequestException(
+                    $"Erro ao atualizar Work Item {workItemId}. Status: {httpResponse.StatusCode}. " +
+                    $"Detalhes: {errorContent}");
+            }
+
+            var response = await httpResponse.Content.ReadAsStringAsync();
+            var json = JObject.Parse(response);
+
+            return ParseWorkItem(json);
+        }
+
+        /// <summary>
+        /// Deleta um Work Item
+        /// </summary>
+        /// <param name="workItemId">ID do Work Item</param>
+        /// <param name="destroy">Se true, deleta permanentemente; se false, move para a lixeira</param>
+        /// <returns>True se a operação foi bem-sucedida</returns>
+        public async Task<bool> DeleteWorkItemAsync(
+            int workItemId,
+            bool destroy = false)
+        {
+            var url = $"https://dev.azure.com/{_organization}/_apis/wit/workitems/{workItemId}?api-version=7.0";
+
+            if (destroy)
+            {
+                url += "&destroy=true";
+            }
+
+            var httpResponse = await _httpClient.DeleteAsync(url);
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                throw new HttpRequestException(
+                    $"Erro ao deletar Work Item {workItemId}. Status: {httpResponse.StatusCode}. " +
+                    $"Detalhes: {errorContent}");
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Método auxiliar para fazer o parse de um Work Item do JSON
+        /// </summary>
+        private WorkItem ParseWorkItem(JToken json)
+        {
+            var workItem = new WorkItem
+            {
+                Id = json["id"]?.ToObject<int>() ?? 0,
+                Rev = json["rev"]?.ToObject<int>() ?? 0,
+                Url = json["url"]?.ToString(),
+                Fields = new Dictionary<string, object>()
+            };
+
+            // Parse dos campos
+            if (json["fields"] != null)
+            {
+                foreach (var field in json["fields"])
+                {
+                    var fieldProp = (JProperty)field;
+                    var fieldValue = fieldProp.Value;
+
+                    // Tentar converter para tipos apropriados
+                    object value;
+                    if (fieldValue.Type == JTokenType.Date)
+                    {
+                        value = fieldValue.ToObject<DateTime>();
+                    }
+                    else if (fieldValue.Type == JTokenType.Integer)
+                    {
+                        value = fieldValue.ToObject<int>();
+                    }
+                    else if (fieldValue.Type == JTokenType.Float)
+                    {
+                        value = fieldValue.ToObject<double>();
+                    }
+                    else if (fieldValue.Type == JTokenType.Boolean)
+                    {
+                        value = fieldValue.ToObject<bool>();
+                    }
+                    else
+                    {
+                        value = fieldValue.ToString();
+                    }
+
+                    workItem.Fields[fieldProp.Name] = value;
+                }
+            }
+
+            // Parse das relações se existirem
+            if (json["relations"] != null)
+            {
+                workItem.Relations = new List<WorkItemRelation>();
+                foreach (var relation in json["relations"])
+                {
+                    workItem.Relations.Add(new WorkItemRelation
+                    {
+                        Rel = relation["rel"]?.ToString(),
+                        Url = relation["url"]?.ToString(),
+                        Attributes = relation["attributes"]?.ToObject<Dictionary<string, object>>()
+                    });
+                }
+            }
+
+            return workItem;
+        }
+
+        #endregion
     }
 
     #region DTOs de Auditoria
@@ -814,6 +1167,93 @@ namespace AzureDevOpsAuditAgent.Class
         /// Capacidades do projeto (versioncontrol, processTemplate, etc.)
         /// </summary>
         public Dictionary<string, Dictionary<string, string>>? Capabilities { get; set; }
+    }
+
+    #endregion
+
+    #region DTOs de Work Items
+
+    /// <summary>
+    /// Representa um Work Item do Azure DevOps
+    /// </summary>
+    public class WorkItem
+    {
+        /// <summary>
+        /// ID único do Work Item
+        /// </summary>
+        public int Id { get; set; }
+
+        /// <summary>
+        /// Número de revisão do Work Item
+        /// </summary>
+        public int Rev { get; set; }
+
+        /// <summary>
+        /// URL do Work Item
+        /// </summary>
+        public string? Url { get; set; }
+
+        /// <summary>
+        /// Campos do Work Item (System.Title, System.State, etc.)
+        /// </summary>
+        public required Dictionary<string, object> Fields { get; set; }
+
+        /// <summary>
+        /// Relações do Work Item (parent, child, related, etc.)
+        /// </summary>
+        public List<WorkItemRelation>? Relations { get; set; }
+    }
+
+    /// <summary>
+    /// Representa uma relação entre Work Items
+    /// </summary>
+    public class WorkItemRelation
+    {
+        /// <summary>
+        /// Tipo de relação (System.LinkTypes.Hierarchy-Forward, etc.)
+        /// </summary>
+        public string? Rel { get; set; }
+
+        /// <summary>
+        /// URL do Work Item relacionado
+        /// </summary>
+        public string? Url { get; set; }
+
+        /// <summary>
+        /// Atributos da relação
+        /// </summary>
+        public Dictionary<string, object>? Attributes { get; set; }
+    }
+
+    /// <summary>
+    /// Resultado de uma query WIQL
+    /// </summary>
+    public class WorkItemQueryResult
+    {
+        /// <summary>
+        /// Tipo da query (flat, tree, oneHop)
+        /// </summary>
+        public string? QueryType { get; set; }
+
+        /// <summary>
+        /// Tipo do resultado
+        /// </summary>
+        public string? QueryResultType { get; set; }
+
+        /// <summary>
+        /// Data/hora da query
+        /// </summary>
+        public DateTime AsOf { get; set; }
+
+        /// <summary>
+        /// Lista de IDs dos Work Items encontrados
+        /// </summary>
+        public required List<int> WorkItemIds { get; set; }
+
+        /// <summary>
+        /// Lista completa dos Work Items encontrados
+        /// </summary>
+        public required List<WorkItem> WorkItems { get; set; }
     }
 
     #endregion
