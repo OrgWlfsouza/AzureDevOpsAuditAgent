@@ -1,537 +1,196 @@
-using AzureDevOpsAuditAgent.Class;
 using Microsoft.AspNetCore.Mvc;
-using System.Text.Json;
+using AzureDevOpsAuditAgent.Attributes;
+using AzureDevOpsAuditAgent.Class;
 
-namespace AzureDevOpsAuditAgent.Controllers
+namespace AzureDevOpsAuditAgent.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class WorkItemsController : ControllerBase
 {
-    /// <summary>
-    /// Controller para gerenciamento de Work Items do Azure DevOps
-    /// </summary>
-    [ApiController]
-    [Route("api/[controller]")]
-    [Produces("application/json")]
-    public class WorkItemsController : ControllerBase
+    private readonly AzureDevOpsService _azureDevOpsService;
+    private readonly ILogger<WorkItemsController> _logger;
+
+    public WorkItemsController(
+        AzureDevOpsService azureDevOpsService,
+        ILogger<WorkItemsController> logger)
     {
-        private readonly AzureDevOpsService _service;
-        private readonly ILogger<WorkItemsController> _logger;
-
-        public WorkItemsController(AzureDevOpsService service, ILogger<WorkItemsController> logger)
-        {
-            _service = service;
-            _logger = logger;
-        }
-
-        /// <summary>
-        /// Cria um novo Work Item
-        /// </summary>
-        /// <param name="request">Dados do Work Item a criar</param>
-        /// <returns>Work Item criado</returns>
-        /// <response code="201">Work Item criado com sucesso</response>
-        /// <response code="400">Requisição inválida</response>
-        /// <response code="500">Erro interno do servidor</response>
-        [HttpPost]
-        [ProducesResponseType(StatusCodes.Status201Created, Type = typeof(WorkItem))]
-        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ProblemDetails))]
-        [ProducesResponseType(StatusCodes.Status500InternalServerError, Type = typeof(ProblemDetails))]
-        public async Task<IActionResult> CreateWorkItem([FromBody] CreateWorkItemRequest request)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(request.Project))
-                {
-                    return BadRequest(new ProblemDetails
-                    {
-                        Title = "Projeto obrigatório",
-                        Detail = "O campo 'Project' é obrigatório.",
-                        Status = StatusCodes.Status400BadRequest
-                    });
-                }
-
-                if (string.IsNullOrWhiteSpace(request.WorkItemType))
-                {
-                    return BadRequest(new ProblemDetails
-                    {
-                        Title = "Tipo de Work Item obrigatório",
-                        Detail = "O campo 'WorkItemType' é obrigatório.",
-                        Status = StatusCodes.Status400BadRequest
-                    });
-                }
-
-                if (request.Fields == null || !request.Fields.Any())
-                {
-                    return BadRequest(new ProblemDetails
-                    {
-                        Title = "Campos obrigatórios",
-                        Detail = "É necessário fornecer pelo menos um campo para o Work Item.",
-                        Status = StatusCodes.Status400BadRequest
-                    });
-                }
-
-                _logger.LogInformation(
-                    "Criando Work Item do tipo {WorkItemType} no projeto {Project}",
-                    request.WorkItemType,
-                    request.Project);
-
-                // Converter JsonElement para valores reais
-                var convertedFields = new Dictionary<string, object>();
-                foreach (var field in request.Fields)
-                {
-                    convertedFields[field.Key] = ConvertJsonElementToValue(field.Value);
-                }
-
-                var workItem = await _service.CreateWorkItemAsync(
-                    request.Project,
-                    request.WorkItemType,
-                    convertedFields);
-
-                return CreatedAtAction(
-                    nameof(GetWorkItem),
-                    new { id = workItem.Id },
-                    workItem);
-            }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError(ex, "Erro HTTP ao criar Work Item");
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro ao criar Work Item",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Erro inesperado ao criar Work Item");
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro interno do servidor",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-        }
-
-        /// <summary>
-        /// Obtém um Work Item por ID
-        /// </summary>
-        /// <param name="id">ID do Work Item</param>
-        /// <param name="fields">Campos específicos a retornar (separados por vírgula)</param>
-        /// <param name="expand">Opções de expansão: None, Relations, Fields, Links, All</param>
-        /// <returns>Work Item encontrado</returns>
-        /// <response code="200">Work Item encontrado</response>
-        /// <response code="404">Work Item não encontrado</response>
-        /// <response code="500">Erro interno do servidor</response>
-        [HttpGet("{id}")]
-        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(WorkItem))]
-        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ProblemDetails))]
-        [ProducesResponseType(StatusCodes.Status500InternalServerError, Type = typeof(ProblemDetails))]
-        public async Task<IActionResult> GetWorkItem(
-            int id,
-            [FromQuery] string? fields = null,
-            [FromQuery] string expand = "All")
-        {
-            try
-            {
-                _logger.LogInformation("Buscando Work Item {WorkItemId}", id);
-
-                var fieldList = string.IsNullOrWhiteSpace(fields)
-                    ? null
-                    : fields.Split(',').Select(f => f.Trim()).ToList();
-
-                var workItem = await _service.GetWorkItemAsync(id, fieldList, expand);
-
-                return Ok(workItem);
-            }
-            catch (HttpRequestException ex) when (ex.Message.Contains("404"))
-            {
-                _logger.LogWarning("Work Item {WorkItemId} não encontrado", id);
-                return NotFound(new ProblemDetails
-                {
-                    Title = "Work Item não encontrado",
-                    Detail = $"O Work Item com ID {id} não foi encontrado.",
-                    Status = StatusCodes.Status404NotFound
-                });
-            }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError(ex, "Erro HTTP ao buscar Work Item {WorkItemId}", id);
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro ao buscar Work Item",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Erro inesperado ao buscar Work Item {WorkItemId}", id);
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro interno do servidor",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-        }
-
-        /// <summary>
-        /// Obtém múltiplos Work Items por IDs
-        /// </summary>
-        /// <param name="ids">Lista de IDs separados por vírgula</param>
-        /// <param name="fields">Campos específicos a retornar (separados por vírgula)</param>
-        /// <returns>Lista de Work Items encontrados</returns>
-        /// <response code="200">Work Items encontrados</response>
-        /// <response code="400">Requisição inválida</response>
-        /// <response code="500">Erro interno do servidor</response>
-        [HttpGet]
-        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(List<WorkItem>))]
-        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ProblemDetails))]
-        [ProducesResponseType(StatusCodes.Status500InternalServerError, Type = typeof(ProblemDetails))]
-        public async Task<IActionResult> GetWorkItems(
-            [FromQuery] string ids,
-            [FromQuery] string? fields = null)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(ids))
-                {
-                    return BadRequest(new ProblemDetails
-                    {
-                        Title = "IDs obrigatórios",
-                        Detail = "É necessário fornecer pelo menos um ID de Work Item.",
-                        Status = StatusCodes.Status400BadRequest
-                    });
-                }
-
-                var idList = ids.Split(',')
-                    .Select(id => int.TryParse(id.Trim(), out var result) ? result : (int?)null)
-                    .Where(id => id.HasValue)
-                    .Select(id => id!.Value)
-                    .ToList();
-
-                if (!idList.Any())
-                {
-                    return BadRequest(new ProblemDetails
-                    {
-                        Title = "IDs inválidos",
-                        Detail = "Nenhum ID válido foi fornecido.",
-                        Status = StatusCodes.Status400BadRequest
-                    });
-                }
-
-                _logger.LogInformation("Buscando {Count} Work Items", idList.Count);
-
-                var fieldList = string.IsNullOrWhiteSpace(fields)
-                    ? null
-                    : fields.Split(',').Select(f => f.Trim()).ToList();
-
-                var workItems = await _service.GetWorkItemsAsync(idList, fieldList);
-
-                return Ok(workItems);
-            }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError(ex, "Erro HTTP ao buscar Work Items");
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro ao buscar Work Items",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Erro inesperado ao buscar Work Items");
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro interno do servidor",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-        }
-
-        /// <summary>
-        /// Executa uma query WIQL para buscar Work Items
-        /// </summary>
-        /// <param name="request">Query WIQL a executar</param>
-        /// <returns>Resultado da query com os Work Items encontrados</returns>
-        /// <response code="200">Query executada com sucesso</response>
-        /// <response code="400">Query inválida</response>
-        /// <response code="500">Erro interno do servidor</response>
-        [HttpPost("query")]
-        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(WorkItemQueryResult))]
-        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ProblemDetails))]
-        [ProducesResponseType(StatusCodes.Status500InternalServerError, Type = typeof(ProblemDetails))]
-        public async Task<IActionResult> QueryWorkItems([FromBody] WorkItemQueryRequest request)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(request.Project))
-                {
-                    return BadRequest(new ProblemDetails
-                    {
-                        Title = "Projeto obrigatório",
-                        Detail = "O campo 'Project' é obrigatório.",
-                        Status = StatusCodes.Status400BadRequest
-                    });
-                }
-
-                if (string.IsNullOrWhiteSpace(request.Wiql))
-                {
-                    return BadRequest(new ProblemDetails
-                    {
-                        Title = "Query WIQL obrigatória",
-                        Detail = "O campo 'Wiql' é obrigatório.",
-                        Status = StatusCodes.Status400BadRequest
-                    });
-                }
-
-                _logger.LogInformation("Executando query WIQL no projeto {Project}", request.Project);
-
-                var result = await _service.QueryWorkItemsAsync(request.Project, request.Wiql);
-
-                return Ok(result);
-            }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError(ex, "Erro HTTP ao executar query WIQL");
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro ao executar query WIQL",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Erro inesperado ao executar query WIQL");
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro interno do servidor",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-        }
-
-        /// <summary>
-        /// Atualiza um Work Item existente
-        /// </summary>
-        /// <param name="id">ID do Work Item</param>
-        /// <param name="request">Campos a atualizar</param>
-        /// <returns>Work Item atualizado</returns>
-        /// <response code="200">Work Item atualizado com sucesso</response>
-        /// <response code="400">Requisição inválida</response>
-        /// <response code="404">Work Item não encontrado</response>
-        /// <response code="500">Erro interno do servidor</response>
-        [HttpPatch("{id}")]
-        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(WorkItem))]
-        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ProblemDetails))]
-        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ProblemDetails))]
-        [ProducesResponseType(StatusCodes.Status500InternalServerError, Type = typeof(ProblemDetails))]
-        public async Task<IActionResult> UpdateWorkItem(int id, [FromBody] UpdateWorkItemRequest request)
-        {
-            try
-            {
-                if (request.Fields == null || !request.Fields.Any())
-                {
-                    return BadRequest(new ProblemDetails
-                    {
-                        Title = "Campos obrigatórios",
-                        Detail = "É necessário fornecer pelo menos um campo para atualizar.",
-                        Status = StatusCodes.Status400BadRequest
-                    });
-                }
-
-                _logger.LogInformation("Atualizando Work Item {WorkItemId}", id);
-
-                // Converter JsonElement para valores reais
-                var convertedFields = new Dictionary<string, object>();
-                foreach (var field in request.Fields)
-                {
-                    convertedFields[field.Key] = ConvertJsonElementToValue(field.Value);
-                }
-
-                var workItem = await _service.UpdateWorkItemAsync(id, convertedFields);
-
-                return Ok(workItem);
-            }
-            catch (HttpRequestException ex) when (ex.Message.Contains("404"))
-            {
-                _logger.LogWarning("Work Item {WorkItemId} não encontrado", id);
-                return NotFound(new ProblemDetails
-                {
-                    Title = "Work Item não encontrado",
-                    Detail = $"O Work Item com ID {id} não foi encontrado.",
-                    Status = StatusCodes.Status404NotFound
-                });
-            }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError(ex, "Erro HTTP ao atualizar Work Item {WorkItemId}", id);
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro ao atualizar Work Item",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Erro inesperado ao atualizar Work Item {WorkItemId}", id);
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro interno do servidor",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-        }
-
-        /// <summary>
-        /// Deleta um Work Item
-        /// </summary>
-        /// <param name="id">ID do Work Item</param>
-        /// <param name="destroy">Se true, deleta permanentemente; se false, move para a lixeira</param>
-        /// <returns>Confirmação da exclusão</returns>
-        /// <response code="204">Work Item deletado com sucesso</response>
-        /// <response code="404">Work Item não encontrado</response>
-        /// <response code="500">Erro interno do servidor</response>
-        [HttpDelete("{id}")]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ProblemDetails))]
-        [ProducesResponseType(StatusCodes.Status500InternalServerError, Type = typeof(ProblemDetails))]
-        public async Task<IActionResult> DeleteWorkItem(int id, [FromQuery] bool destroy = false)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Deletando Work Item {WorkItemId} (destroy: {Destroy})",
-                    id,
-                    destroy);
-
-                await _service.DeleteWorkItemAsync(id, destroy);
-
-                return NoContent();
-            }
-            catch (HttpRequestException ex) when (ex.Message.Contains("404"))
-            {
-                _logger.LogWarning("Work Item {WorkItemId} não encontrado", id);
-                return NotFound(new ProblemDetails
-                {
-                    Title = "Work Item não encontrado",
-                    Detail = $"O Work Item com ID {id} não foi encontrado.",
-                    Status = StatusCodes.Status404NotFound
-                });
-            }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError(ex, "Erro HTTP ao deletar Work Item {WorkItemId}", id);
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro ao deletar Work Item",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Erro inesperado ao deletar Work Item {WorkItemId}", id);
-                return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
-                {
-                    Title = "Erro interno do servidor",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status500InternalServerError
-                });
-            }
-        }
-
-        private object ConvertJsonElementToValue(object value)
-        {
-            // Se já é um valor primitivo, retornar como está
-            if (value is string || value is int || value is long || 
-                value is double || value is float || value is bool || 
-                value is decimal || value == null)
-            {
-                return value;
-            }
-
-            // Se é JsonElement, extrair o valor real
-            if (value is JsonElement element)
-            {
-                return element.ValueKind switch
-                {
-                    JsonValueKind.String => element.GetString()!,
-                    JsonValueKind.Number => element.TryGetInt32(out var intVal) ? intVal : 
-                                          element.TryGetInt64(out var longVal) ? longVal : 
-                                          element.GetDouble(),
-                    JsonValueKind.True => true,
-                    JsonValueKind.False => false,
-                    JsonValueKind.Null => null!,
-                    JsonValueKind.Array => element.EnumerateArray()
-                        .Select(e => ConvertJsonElementToValue(e))
-                        .ToList(),
-                    JsonValueKind.Object => element.EnumerateObject()
-                        .ToDictionary(p => p.Name, p => ConvertJsonElementToValue(p.Value)),
-                    _ => element.ToString()
-                };
-            }
-
-            // Para outros tipos, retornar como está
-            return value;
-        }
-    }
-
-    #region Request Models
-
-    /// <summary>
-    /// Modelo de requisição para criar um Work Item
-    /// </summary>
-    public class CreateWorkItemRequest
-    {
-        /// <summary>
-        /// Nome ou ID do projeto
-        /// </summary>
-        public required string Project { get; set; }
-
-        /// <summary>
-        /// Tipo do Work Item (Bug, Task, User Story, Feature, Epic, etc.)
-        /// </summary>
-        public required string WorkItemType { get; set; }
-
-        /// <summary>
-        /// Campos do Work Item (ex: System.Title, System.Description, System.State, etc.)
-        /// </summary>
-        public required Dictionary<string, object> Fields { get; set; }
+        _azureDevOpsService = azureDevOpsService;
+        _logger = logger;
     }
 
     /// <summary>
-    /// Modelo de requisição para atualizar um Work Item
+    /// Gets a Work Item by ID
     /// </summary>
-    public class UpdateWorkItemRequest
+    /// <param name="workItemId">Work Item ID</param>
+    /// <returns>Work Item details</returns>
+    [HttpGet("{workItemId}")]
+    [ProducesResponseType(typeof(WorkItem), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetWorkItem(int workItemId)
     {
-        /// <summary>
-        /// Campos a atualizar (ex: System.State, System.AssignedTo, etc.)
-        /// </summary>
-        public required Dictionary<string, object> Fields { get; set; }
+        try
+        {
+            var workItem = await _azureDevOpsService.GetWorkItemAsync(workItemId);
+            return Ok(workItem);
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "Error getting Work Item {WorkItemId}", workItemId);
+            return NotFound(new { error = ex.Message });
+        }
     }
 
     /// <summary>
-    /// Modelo de requisição para executar uma query WIQL
+    /// Creates a new Work Item
     /// </summary>
-    public class WorkItemQueryRequest
+    /// <param name="request">Work Item data to create</param>
+    /// <returns>Created Work Item</returns>
+    [HttpPost]
+    [FeatureFlag("WorkItemCreation")]
+    [ProducesResponseType(typeof(WorkItem), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> CreateWorkItem([FromBody] CreateWorkItemRequest request)
     {
-        /// <summary>
-        /// Nome ou ID do projeto
-        /// </summary>
-        public required string Project { get; set; }
+        try
+        {
+            var workItem = await _azureDevOpsService.CreateWorkItemAsync(
+                request.ProjectIdOrName,
+                request.WorkItemType,
+                request.Fields);
 
-        /// <summary>
-        /// Query WIQL (Work Item Query Language)
-        /// </summary>
-        public required string Wiql { get; set; }
+            return CreatedAtAction(
+                nameof(GetWorkItem),
+                new { workItemId = workItem.Id },
+                workItem);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("feature"))
+        {
+            // Feature flag disabled
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                error = "Operation temporarily disabled",
+                details = ex.Message
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating Work Item");
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
-    #endregion
+    /// <summary>
+    /// Updates an existing Work Item
+    /// </summary>
+    /// <param name="workItemId">Work Item ID</param>
+    /// <param name="fields">Fields to update</param>
+    /// <returns>Updated Work Item</returns>
+    [HttpPatch("{workItemId}")]
+    [FeatureFlag("WorkItemUpdate")]
+    [ProducesResponseType(typeof(WorkItem), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> UpdateWorkItem(
+        int workItemId,
+        [FromBody] Dictionary<string, object> fields)
+    {
+        try
+        {
+            var workItem = await _azureDevOpsService.UpdateWorkItemAsync(workItemId, fields);
+            return Ok(workItem);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("feature"))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                error = "Operation temporarily disabled",
+                details = ex.Message
+            });
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "Error updating Work Item {WorkItemId}", workItemId);
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Deletes a Work Item
+    /// </summary>
+    /// <param name="workItemId">Work Item ID</param>
+    /// <param name="destroy">If true, deletes permanently</param>
+    /// <returns>Deletion confirmation</returns>
+    [HttpDelete("{workItemId}")]
+    [FeatureFlag("WorkItemDeletion")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> DeleteWorkItem(
+        int workItemId,
+        [FromQuery] bool destroy = false)
+    {
+        try
+        {
+            await _azureDevOpsService.DeleteWorkItemAsync(workItemId, destroy);
+            return NoContent();
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("feature"))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                error = "Operation temporarily disabled",
+                details = ex.Message
+            });
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "Error deleting Work Item {WorkItemId}", workItemId);
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Executes a WIQL query to search for Work Items
+    /// </summary>
+    /// <param name="projectIdOrName">Project ID or name</param>
+    /// <param name="wiql">WIQL query</param>
+    /// <returns>Query result</returns>
+    [HttpPost("query")]
+    [FeatureFlag("WorkItemQuery")]
+    [ProducesResponseType(typeof(WorkItemQueryResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> QueryWorkItems(
+        [FromQuery] string projectIdOrName,
+        [FromBody] string wiql)
+    {
+        try
+        {
+            var result = await _azureDevOpsService.QueryWorkItemsAsync(projectIdOrName, wiql);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("feature"))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                error = "Operation temporarily disabled",
+                details = ex.Message
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error executing WIQL query");
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+}
+
+// DTO for Work Item creation
+public class CreateWorkItemRequest
+{
+    public required string ProjectIdOrName { get; set; }
+    public required string WorkItemType { get; set; }
+    public required Dictionary<string, object> Fields { get; set; }
 }

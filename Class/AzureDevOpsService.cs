@@ -1,7 +1,7 @@
-﻿using Newtonsoft.Json.Linq;
+﻿using Microsoft.FeatureManagement;
+using Newtonsoft.Json.Linq;
 using System.Net.Http.Headers;
 using System.Text;
-using System.Text.Json;
 
 namespace AzureDevOpsAuditAgent.Class
 {
@@ -10,24 +10,47 @@ namespace AzureDevOpsAuditAgent.Class
         private readonly HttpClient _httpClient;
         private readonly string _organization;
         private readonly ILogger<AzureDevOpsService>? _logger;
+        private readonly IFeatureManager _featureManager;
 
-        public AzureDevOpsService(IConfiguration config, HttpClient httpClient, ILogger<AzureDevOpsService>? logger = null)
+        public AzureDevOpsService(
+            IConfiguration config,
+            HttpClient httpClient,
+            IFeatureManager featureManager,
+            ILogger<AzureDevOpsService>? logger = null)
         {
             _httpClient = httpClient;
-            _organization = config["AzureDevOps:Organization"];
+            _organization = config["AzureDevOps:Organization"] ?? throw new ArgumentNullException(nameof(config), "AzureDevOps:Organization configuration is required");
             _logger = logger;
-            var pat = config["AzureDevOps:PAT"];
+            _featureManager = featureManager;
+            var pat = config["AzureDevOps:PAT"] ?? throw new ArgumentNullException(nameof(config), "AzureDevOps:PAT configuration is required");
             var byteArray = System.Text.Encoding.ASCII.GetBytes($":{pat}");
             _httpClient.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Basic", Convert.ToBase64String(byteArray));
         }
 
+        /// <summary>
+        /// Método auxiliar para verificar se uma feature flag está habilitada
+        /// </summary>
+        /// <param name="featureName">Nome da feature flag</param>
+        /// <exception cref="InvalidOperationException">Lançado quando a feature está desabilitada</exception>
+        private async Task EnsureFeatureEnabledAsync(string featureName)
+        {
+            if (!await _featureManager.IsEnabledAsync(featureName))
+            {
+                _logger?.LogWarning("Tentativa de executar operação com feature '{FeatureName}' desabilitada.", featureName);
+                throw new InvalidOperationException(
+                    $"Operação bloqueada: A feature '{featureName}' está desabilitada. " +
+                    $"Verifique as configurações de Feature Flags no appsettings.json.");
+            }
+        }
+
+        // Métodos GET permanecem inalterados
         public async Task<int> GetProjectCountAsync()
         {
             var url = $"https://dev.azure.com/{_organization}/_apis/projects?api-version=7.0";
             var response = await _httpClient.GetStringAsync(url);
             var json = JObject.Parse(response);
-            return json["value"].Count();
+            return json["value"]?.Count() ?? 0;
         }
 
         public async Task<int> GetUserCountAsync()
@@ -35,7 +58,7 @@ namespace AzureDevOpsAuditAgent.Class
             var url = $"https://vsaex.dev.azure.com/{_organization}/_apis/userentitlements?api-version=7.0-preview.3";
             var response = await _httpClient.GetStringAsync(url);
             var json = JObject.Parse(response);
-            return json["members"].Count();
+            return json["members"]?.Count() ?? 0;
         }
 
         public async Task<string> GetUserLicenseAsync(string userPrincipalName)
@@ -44,56 +67,51 @@ namespace AzureDevOpsAuditAgent.Class
             var response = await _httpClient.GetStringAsync(url);
             var json = JObject.Parse(response);
 
-            var user = json["members"]
-                .FirstOrDefault(u => u["user"]["principalName"].ToString() == userPrincipalName);
+            var user = json["members"]?
+                .FirstOrDefault(u => u["user"]?["principalName"]?.ToString() == userPrincipalName);
 
-            return user?["accessLevel"]["accountLicenseType"]?.ToString() ?? "Não encontrado";
+            return user?["accessLevel"]?["accountLicenseType"]?.ToString() ?? "Não encontrado";
         }
 
         public async Task<List<string>> GetProjectAdministratorsAsync(string projectId)
         {
-            // Primeiro, obter o namespace de segurança para projetos
             var nsUrl = $"https://dev.azure.com/{_organization}/_apis/securitynamespaces?api-version=7.0";
             var nsResponse = await _httpClient.GetStringAsync(nsUrl);
             var nsJson = JObject.Parse(nsResponse);
 
-            var projectNamespace = nsJson["value"]
-                .FirstOrDefault(n => n["name"].ToString() == "Project");
+            var projectNamespace = nsJson["value"]?
+                .FirstOrDefault(n => n["name"]?.ToString() == "Project");
 
             if (projectNamespace == null)
                 return new List<string>();
 
-            var namespaceId = projectNamespace["namespaceId"].ToString();
+            var namespaceId = projectNamespace["namespaceId"]?.ToString();
 
-            // Obter o token de segurança do projeto
-            // O token para um projeto é: $PROJECT:{projectId}
+            if (string.IsNullOrEmpty(namespaceId))
+                return new List<string>();
+
             var securityToken = $"$PROJECT:{projectId}";
-
-            // Usar o endpoint correto de Access Control Lists (ACLs) em vez de Access Control Entries
             var aclUrl = $"https://dev.azure.com/{_organization}/_apis/accesscontrollists/{namespaceId}?token={securityToken}&api-version=7.0";
             var aclResponse = await _httpClient.GetStringAsync(aclUrl);
             var aclJson = JObject.Parse(aclResponse);
 
             var admins = new List<string>();
 
-            if (aclJson["value"] != null && aclJson["value"].Any())
+            if (aclJson["value"] != null && aclJson["value"]!.Any())
             {
-                foreach (var acl in aclJson["value"])
+                foreach (var acl in aclJson["value"]!)
                 {
                     var acesDictionary = acl["acesDictionary"] as JObject;
-                    
+
                     if (acesDictionary != null)
                     {
                         foreach (var kvp in acesDictionary)
                         {
                             var descriptor = kvp.Key;
                             var ace = kvp.Value;
-                            
-                            // Verificar se tem permissões administrativas
-                            // Bit 15 (valor 32768) = GENERIC_MANAGE (administração do projeto)
-                            var allow = ace["allow"]?.Value<int>() ?? 0;
-                            
-                            // Permissão de administrador de projeto (GENERIC_MANAGE = 32768)
+
+                            var allow = ace?["allow"]?.Value<int>() ?? 0;
+
                             if ((allow & 32768) != 0)
                             {
                                 admins.Add(descriptor);
@@ -131,14 +149,6 @@ namespace AzureDevOpsAuditAgent.Class
             return resolved;
         }
 
-        /// <summary>
-        /// Consulta o audit log do Azure DevOps para um período específico
-        /// </summary>
-        /// <param name="startTime">Data/hora inicial da consulta</param>
-        /// <param name="endTime">Data/hora final da consulta</param>
-        /// <param name="batchSize">Número de registros por página (padrão: 100)</param>
-        /// <param name="continuationToken">Token para paginação</param>
-        /// <returns>Dados do audit log</returns>
         public async Task<AuditLogResponse> GetAuditLogAsync(
             DateTime startTime,
             DateTime endTime,
@@ -155,7 +165,6 @@ namespace AzureDevOpsAuditAgent.Class
                 url += $"&continuationToken={continuationToken}";
             }
 
-            // Usar HttpResponseMessage para capturar melhor os erros
             var httpResponse = await _httpClient.GetAsync(url);
 
             if (!httpResponse.IsSuccessStatusCode)
@@ -171,7 +180,6 @@ namespace AzureDevOpsAuditAgent.Class
 
             var response = await httpResponse.Content.ReadAsStringAsync();
 
-            // Validar se a resposta é JSON válido
             if (string.IsNullOrWhiteSpace(response) || response.TrimStart().StartsWith("<"))
             {
                 throw new InvalidOperationException(
@@ -185,7 +193,7 @@ namespace AzureDevOpsAuditAgent.Class
 
             if (json["decoratedAuditLogEntries"] != null)
             {
-                foreach (var entry in json["decoratedAuditLogEntries"])
+                foreach (var entry in json["decoratedAuditLogEntries"]!)
                 {
                     auditEntries.Add(new AuditEntry
                     {
@@ -227,10 +235,6 @@ namespace AzureDevOpsAuditAgent.Class
 
         #region Gerenciamento de Usuários e Grupos
 
-        /// <summary>
-        /// Lista todos os usuários da organização
-        /// </summary>
-        /// <returns>Lista de usuários</returns>
         public async Task<List<GraphUser>> GetUsersAsync()
         {
             var url = $"https://vssps.dev.azure.com/{_organization}/_apis/graph/users?api-version=7.0-preview.1";
@@ -250,7 +254,7 @@ namespace AzureDevOpsAuditAgent.Class
 
             if (json["value"] != null)
             {
-                foreach (var user in json["value"])
+                foreach (var user in json["value"]!)
                 {
                     users.Add(new GraphUser
                     {
@@ -270,11 +274,6 @@ namespace AzureDevOpsAuditAgent.Class
             return users;
         }
 
-        /// <summary>
-        /// Busca um usuário específico por email
-        /// </summary>
-        /// <param name="email">Email do usuário</param>
-        /// <returns>Usuário encontrado ou null</returns>
         public async Task<GraphUser?> GetUserByEmailAsync(string email)
         {
             var users = await GetUsersAsync();
@@ -283,10 +282,6 @@ namespace AzureDevOpsAuditAgent.Class
                 u.PrincipalName?.Equals(email, StringComparison.OrdinalIgnoreCase) == true);
         }
 
-        /// <summary>
-        /// Lista todos os grupos da organização
-        /// </summary>
-        /// <returns>Lista de grupos</returns>
         public async Task<List<GraphGroup>> GetGroupsAsync()
         {
             var url = $"https://vssps.dev.azure.com/{_organization}/_apis/graph/groups?api-version=7.0-preview.1";
@@ -306,7 +301,7 @@ namespace AzureDevOpsAuditAgent.Class
 
             if (json["value"] != null)
             {
-                foreach (var group in json["value"])
+                foreach (var group in json["value"]!)
                 {
                     groups.Add(new GraphGroup
                     {
@@ -326,11 +321,6 @@ namespace AzureDevOpsAuditAgent.Class
             return groups;
         }
 
-        /// <summary>
-        /// Busca um grupo específico por nome
-        /// </summary>
-        /// <param name="groupName">Nome do grupo</param>
-        /// <returns>Grupo encontrado ou null</returns>
         public async Task<GraphGroup?> GetGroupByNameAsync(string groupName)
         {
             var groups = await GetGroupsAsync();
@@ -347,13 +337,23 @@ namespace AzureDevOpsAuditAgent.Class
         /// <returns>True se a operação foi bem-sucedida</returns>
         public async Task<bool> AddUserToGroupAsync(string groupDescriptor, string userDescriptor)
         {
+            // ✅ FEATURE FLAG: Verificar se operações de gerenciamento de usuários/grupos estão habilitadas
+            await EnsureFeatureEnabledAsync("UserGroupManagement");
+
             var url = $"https://vssps.dev.azure.com/{_organization}/_apis/graph/memberships/{userDescriptor}/{groupDescriptor}?api-version=7.0-preview.1";
 
-            var httpResponse = await _httpClient.PutAsync(url, new StringContent(string.Empty));
+            _logger?.LogInformation($"Tentando adicionar usuário ao grupo. URL: {url}");
+            _logger?.LogInformation($"User Descriptor: {userDescriptor}");
+            _logger?.LogInformation($"Group Descriptor: {groupDescriptor}");
+
+            var content = new StringContent(string.Empty, Encoding.UTF8, "application/json");
+            var httpResponse = await _httpClient.PutAsync(url, content);
 
             if (!httpResponse.IsSuccessStatusCode)
             {
                 var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                _logger?.LogError($"Erro 400 - Detalhes completos: {errorContent}");
+
                 throw new HttpRequestException(
                     $"Erro ao adicionar usuário ao grupo. Status: {httpResponse.StatusCode}. " +
                     $"Detalhes: {errorContent}. " +
@@ -371,6 +371,9 @@ namespace AzureDevOpsAuditAgent.Class
         /// <returns>True se a operação foi bem-sucedida</returns>
         public async Task<bool> RemoveUserFromGroupAsync(string groupDescriptor, string userDescriptor)
         {
+            // ✅ FEATURE FLAG: Verificar se operações de gerenciamento de usuários/grupos estão habilitadas
+            await EnsureFeatureEnabledAsync("UserGroupManagement");
+
             var url = $"https://vssps.dev.azure.com/{_organization}/_apis/graph/memberships/{userDescriptor}/{groupDescriptor}?api-version=7.0-preview.1";
 
             var httpResponse = await _httpClient.DeleteAsync(url);
@@ -387,11 +390,6 @@ namespace AzureDevOpsAuditAgent.Class
             return true;
         }
 
-        /// <summary>
-        /// Lista os membros de um grupo específico
-        /// </summary>
-        /// <param name="groupDescriptor">Descriptor do grupo</param>
-        /// <returns>Lista de membros do grupo</returns>
         public async Task<List<GraphMember>> GetGroupMembersAsync(string groupDescriptor)
         {
             var url = $"https://vssps.dev.azure.com/{_organization}/_apis/graph/memberships/{groupDescriptor}?direction=down&api-version=7.0-preview.1";
@@ -411,7 +409,7 @@ namespace AzureDevOpsAuditAgent.Class
 
             if (json["value"] != null)
             {
-                foreach (var member in json["value"])
+                foreach (var member in json["value"]!)
                 {
                     members.Add(new GraphMember
                     {
@@ -424,22 +422,15 @@ namespace AzureDevOpsAuditAgent.Class
             return members;
         }
 
-        /// <summary>
-        /// Lista todos os projetos da organização Azure DevOps
-        /// </summary>
-        /// <param name="stateFilter">Filtro de estado: 'all', 'wellFormed', 'createPending', 'deleting', 'new' ou 'unchanged'</param>
-        /// <param name="top">Número máximo de projetos a retornar</param>
-        /// <param name="skip">Número de projetos a pular (para paginação)</param>
-        /// <returns>Lista de projetos</returns>
         public async Task<ProjectsResponse> GetProjectsAsync(string stateFilter = "wellFormed", int? top = null, int? skip = null)
         {
             var url = $"https://dev.azure.com/{_organization}/_apis/projects?stateFilter={stateFilter}&api-version=7.0";
-            
+
             if (top.HasValue)
             {
                 url += $"&$top={top.Value}";
             }
-            
+
             if (skip.HasValue)
             {
                 url += $"&$skip={skip.Value}";
@@ -461,7 +452,7 @@ namespace AzureDevOpsAuditAgent.Class
 
             if (json["value"] != null)
             {
-                foreach (var project in json["value"])
+                foreach (var project in json["value"]!)
                 {
                     projects.Add(new AzureDevOpsProject
                     {
@@ -484,25 +475,18 @@ namespace AzureDevOpsAuditAgent.Class
             };
         }
 
-        /// <summary>
-        /// Obtém detalhes de um projeto específico pelo ID ou nome
-        /// </summary>
-        /// <param name="projectIdOrName">ID ou nome do projeto</param>
-        /// <param name="includeCapabilities">Incluir informações de capacidades do projeto</param>
-        /// <param name="includeHistory">Incluir histórico do projeto</param>
-        /// <returns>Detalhes do projeto</returns>
         public async Task<AzureDevOpsProjectDetails> GetProjectDetailsAsync(
-            string projectIdOrName, 
-            bool includeCapabilities = false, 
+            string projectIdOrName,
+            bool includeCapabilities = false,
             bool includeHistory = false)
         {
             var url = $"https://dev.azure.com/{_organization}/_apis/projects/{projectIdOrName}?api-version=7.0";
-            
+
             if (includeCapabilities)
             {
                 url += "&includeCapabilities=true";
             }
-            
+
             if (includeHistory)
             {
                 url += "&includeHistory=true";
@@ -533,25 +517,24 @@ namespace AzureDevOpsAuditAgent.Class
                 DefaultTeamImageUrl = json["defaultTeamImageUrl"]?.ToString()
             };
 
-            // Processar capabilities se disponível
             if (json["capabilities"] != null)
             {
                 var capabilities = new Dictionary<string, Dictionary<string, string>>();
-                
-                foreach (var capability in json["capabilities"])
+
+                foreach (var capability in json["capabilities"]!)
                 {
                     var capProp = (JProperty)capability;
                     var capDict = new Dictionary<string, string>();
-                    
+
                     foreach (var item in capProp.Value)
                     {
                         var itemProp = (JProperty)item;
                         capDict[itemProp.Name] = itemProp.Value?.ToString() ?? string.Empty;
                     }
-                    
+
                     capabilities[capProp.Name] = capDict;
                 }
-                
+
                 projectDetails.Capabilities = capabilities;
             }
 
@@ -574,6 +557,9 @@ namespace AzureDevOpsAuditAgent.Class
             string workItemType,
             Dictionary<string, object> fields)
         {
+            // ✅ FEATURE FLAG: Verificar se criação de work items está habilitada
+            await EnsureFeatureEnabledAsync("WorkItemCreation");
+
             // Validar que System.Title existe
             if (!fields.ContainsKey("System.Title") || string.IsNullOrWhiteSpace(fields["System.Title"]?.ToString()))
             {
@@ -605,12 +591,12 @@ namespace AzureDevOpsAuditAgent.Class
             if (!httpResponse.IsSuccessStatusCode)
             {
                 var errorContent = await httpResponse.Content.ReadAsStringAsync();
-                
+
                 // Log detalhes completos do erro
                 _logger?.LogError(
                     "Erro ao criar Work Item. Status: {StatusCode}, URL: {Url}, Payload: {Payload}, Resposta: {Response}",
                     httpResponse.StatusCode, url, jsonContent, errorContent);
-                
+
                 throw new HttpRequestException(
                     $"Erro ao criar Work Item. Status: {httpResponse.StatusCode}. " +
                     $"Detalhes: {errorContent}. " +
@@ -626,13 +612,6 @@ namespace AzureDevOpsAuditAgent.Class
             return ParseWorkItem(json);
         }
 
-        /// <summary>
-        /// Obtém um Work Item por ID
-        /// </summary>
-        /// <param name="workItemId">ID do Work Item</param>
-        /// <param name="fields">Lista de campos específicos a retornar (opcional)</param>
-        /// <param name="expand">Opções de expansão: None, Relations, Fields, Links, All</param>
-        /// <returns>Work Item encontrado</returns>
         public async Task<WorkItem> GetWorkItemAsync(
             int workItemId,
             List<string>? fields = null,
@@ -666,12 +645,6 @@ namespace AzureDevOpsAuditAgent.Class
             return ParseWorkItem(json);
         }
 
-        /// <summary>
-        /// Obtém múltiplos Work Items por IDs
-        /// </summary>
-        /// <param name="workItemIds">Lista de IDs dos Work Items</param>
-        /// <param name="fields">Lista de campos específicos a retornar (opcional)</param>
-        /// <returns>Lista de Work Items</returns>
         public async Task<List<WorkItem>> GetWorkItemsAsync(
             List<int> workItemIds,
             List<string>? fields = null)
@@ -703,7 +676,7 @@ namespace AzureDevOpsAuditAgent.Class
 
             if (json["value"] != null)
             {
-                foreach (var item in json["value"])
+                foreach (var item in json["value"]!)
                 {
                     workItems.Add(ParseWorkItem(item));
                 }
@@ -720,6 +693,9 @@ namespace AzureDevOpsAuditAgent.Class
         /// <returns>Lista de Work Items encontrados</returns>
         public async Task<WorkItemQueryResult> QueryWorkItemsAsync(string projectIdOrName, string wiql)
         {
+            // ✅ FEATURE FLAG: Verificar se queries de work items estão habilitadas
+            await EnsureFeatureEnabledAsync("WorkItemQuery");
+
             var url = $"https://dev.azure.com/{_organization}/{projectIdOrName}/_apis/wit/wiql?api-version=7.0";
 
             var payload = new { query = wiql };
@@ -750,7 +726,7 @@ namespace AzureDevOpsAuditAgent.Class
 
             if (json["workItems"] != null)
             {
-                foreach (var item in json["workItems"])
+                foreach (var item in json["workItems"]!)
                 {
                     var id = item["id"]?.ToObject<int>();
                     if (id.HasValue)
@@ -779,6 +755,9 @@ namespace AzureDevOpsAuditAgent.Class
             int workItemId,
             Dictionary<string, object> fields)
         {
+            // ✅ FEATURE FLAG: Verificar se atualização de work items está habilitada
+            await EnsureFeatureEnabledAsync("WorkItemUpdate");
+
             var url = $"https://dev.azure.com/{_organization}/_apis/wit/workitems/{workItemId}?api-version=7.0";
 
             // Criar o payload no formato JSON Patch
@@ -822,6 +801,9 @@ namespace AzureDevOpsAuditAgent.Class
             int workItemId,
             bool destroy = false)
         {
+            // ✅ FEATURE FLAG: Verificar se deleção de work items está habilitada (mais crítico!)
+            await EnsureFeatureEnabledAsync("WorkItemDeletion");
+
             var url = $"https://dev.azure.com/{_organization}/_apis/wit/workitems/{workItemId}?api-version=7.0";
 
             if (destroy)
@@ -842,9 +824,6 @@ namespace AzureDevOpsAuditAgent.Class
             return true;
         }
 
-        /// <summary>
-        /// Método auxiliar para fazer o parse de um Work Item do JSON
-        /// </summary>
         private WorkItem ParseWorkItem(JToken json)
         {
             var workItem = new WorkItem
@@ -858,7 +837,7 @@ namespace AzureDevOpsAuditAgent.Class
             // Parse dos campos
             if (json["fields"] != null)
             {
-                foreach (var field in json["fields"])
+                foreach (var field in json["fields"]!)
                 {
                     var fieldProp = (JProperty)field;
                     var fieldValue = fieldProp.Value;
@@ -894,7 +873,7 @@ namespace AzureDevOpsAuditAgent.Class
             if (json["relations"] != null)
             {
                 workItem.Relations = new List<WorkItemRelation>();
-                foreach (var relation in json["relations"])
+                foreach (var relation in json["relations"]!)
                 {
                     workItem.Relations.Add(new WorkItemRelation
                     {
@@ -909,39 +888,372 @@ namespace AzureDevOpsAuditAgent.Class
         }
 
         #endregion
+
+        public async Task<bool> AddUserToGroupByNameAsync(string groupDisplayName, string userDisplayName)
+        {
+            var group = await GetGroupByNameAsync(groupDisplayName);
+            if (group == null)
+            {
+                throw new ArgumentException($"Grupo '{groupDisplayName}' não encontrado");
+            }
+
+            var users = await GetUsersAsync();
+            var user = users.FirstOrDefault(u =>
+                u.DisplayName?.Equals(userDisplayName, StringComparison.OrdinalIgnoreCase) == true ||
+                u.MailAddress?.Equals(userDisplayName, StringComparison.OrdinalIgnoreCase) == true ||
+                u.PrincipalName?.Equals(userDisplayName, StringComparison.OrdinalIgnoreCase) == true);
+
+            if (user == null)
+            {
+                throw new ArgumentException($"Usuário '{userDisplayName}' não encontrado");
+            }
+
+            if (string.IsNullOrEmpty(group.Descriptor) || string.IsNullOrEmpty(user.Descriptor))
+            {
+                throw new InvalidOperationException("Descriptor do grupo ou usuário está vazio");
+            }
+
+            return await AddUserToGroupAsync(group.Descriptor, user.Descriptor);
+        }
+
+        public async Task<bool> RemoveUserFromGroupByNameAsync(string groupDisplayName, string userDisplayName)
+        {
+            var group = await GetGroupByNameAsync(groupDisplayName);
+            if (group == null)
+            {
+                throw new ArgumentException($"Grupo '{groupDisplayName}' não encontrado");
+            }
+
+            var users = await GetUsersAsync();
+            var user = users.FirstOrDefault(u =>
+                u.DisplayName?.Equals(userDisplayName, StringComparison.OrdinalIgnoreCase) == true ||
+                u.MailAddress?.Equals(userDisplayName, StringComparison.OrdinalIgnoreCase) == true ||
+                u.PrincipalName?.Equals(userDisplayName, StringComparison.OrdinalIgnoreCase) == true);
+
+            if (user == null)
+            {
+                throw new ArgumentException($"Usuário '{userDisplayName}' não encontrado");
+            }
+
+            if (string.IsNullOrEmpty(group.Descriptor) || string.IsNullOrEmpty(user.Descriptor))
+            {
+                throw new InvalidOperationException("Descriptor do grupo ou usuário está vazio");
+            }
+
+            return await RemoveUserFromGroupAsync(group.Descriptor, user.Descriptor);
+        }
+
+        public async Task<GroupEntitlementsResponse> GetGroupEntitlementsAsync()
+        {
+            var url = $"https://vsaex.dev.azure.com/{_organization}/_apis/groupentitlements?api-version=7.2-preview.1";
+            var httpResponse = await _httpClient.GetAsync(url);
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                var errorContent = await httpResponse.Content.ReadAsStringAsync();
+                throw new HttpRequestException(
+                    $"Erro ao listar group entitlements. Status: {httpResponse.StatusCode}. " +
+                    $"Detalhes: {errorContent}. " +
+                    $"Verifique se o PAT tem permissões de 'Member Entitlement Management' (Read).");
+            }
+
+            var response = await httpResponse.Content.ReadAsStringAsync();
+            var json = JObject.Parse(response);
+
+            var groupEntitlements = new List<GroupEntitlement>();
+
+            if (json["value"] != null)
+            {
+                foreach (var item in json["value"]!)
+                {
+                    groupEntitlements.Add(ParseGroupEntitlement(item));
+                }
+            }
+
+            return new GroupEntitlementsResponse
+            {
+                Count = json["count"]?.ToObject<int>() ?? groupEntitlements.Count,
+                GroupEntitlements = groupEntitlements
+            };
+        }
+
+        private GroupEntitlement ParseGroupEntitlement(JToken json)
+        {
+            var groupEntitlement = new GroupEntitlement
+            {
+                Id = json["id"]?.ToString(),
+                Status = json["status"]?.ToString(),
+                LastExecuted = json["lastExecuted"]?.ToObject<DateTime>()
+            };
+
+            if (json["group"] != null)
+            {
+                var group = json["group"]!;
+                groupEntitlement.Group = new GraphGroupDetail
+                {
+                    Descriptor = group["descriptor"]?.ToString(),
+                    DisplayName = group["displayName"]?.ToString(),
+                    PrincipalName = group["principalName"]?.ToString(),
+                    MailAddress = group["mailAddress"]?.ToString(),
+                    Origin = group["origin"]?.ToString(),
+                    OriginId = group["originId"]?.ToString(),
+                    SubjectKind = group["subjectKind"]?.ToString(),
+                    Domain = group["domain"]?.ToString(),
+                    Description = group["description"]?.ToString(),
+                    Url = group["url"]?.ToString()
+                };
+            }
+
+            if (json["licenseRule"] != null)
+            {
+                var licenseRule = json["licenseRule"]!;
+                groupEntitlement.LicenseRule = new AccessLevel
+                {
+                    LicensingSource = licenseRule["licensingSource"]?.ToString(),
+                    AccountLicenseType = licenseRule["accountLicenseType"]?.ToString(),
+                    MsdnLicenseType = licenseRule["msdnLicenseType"]?.ToString(),
+                    LicenseDisplayName = licenseRule["licenseDisplayName"]?.ToString(),
+                    Status = licenseRule["status"]?.ToString(),
+                    StatusMessage = licenseRule["statusMessage"]?.ToString(),
+                    AssignmentSource = licenseRule["assignmentSource"]?.ToString()
+                };
+            }
+
+            if (json["projectEntitlements"] != null)
+            {
+                groupEntitlement.ProjectEntitlements = new List<ProjectEntitlementDetail>();
+                foreach (var pe in json["projectEntitlements"]!)
+                {
+                    var projectEntitlement = new ProjectEntitlementDetail
+                    {
+                        AssignmentSource = pe["assignmentSource"]?.ToString(),
+                        IsProjectPermissionInherited = pe["isProjectPermissionInherited"]?.ToObject<bool>() ?? false
+                    };
+
+                    // Parse da referência do projeto
+                    if (pe["projectRef"] != null)
+                    {
+                        projectEntitlement.ProjectRef = new ProjectReference
+                        {
+                            Id = pe["projectRef"]!["id"]?.ToString(),
+                            Name = pe["projectRef"]!["name"]?.ToString()
+                        };
+                    }
+
+                    // Parse do grupo
+                    if (pe["group"] != null)
+                    {
+                        projectEntitlement.Group = new ProjectGroupDetail
+                        {
+                            GroupType = pe["group"]!["groupType"]?.ToString(),
+                            DisplayName = pe["group"]!["displayName"]?.ToString()
+                        };
+                    }
+
+                    // Parse das referências de times
+                    if (pe["teamRefs"] != null)
+                    {
+                        projectEntitlement.TeamRefs = new List<TeamReference>();
+                        foreach (var team in pe["teamRefs"]!)
+                        {
+                            projectEntitlement.TeamRefs.Add(new TeamReference
+                            {
+                                Id = team["id"]?.ToString(),
+                                Name = team["name"]?.ToString()
+                            });
+                        }
+                    }
+
+                    groupEntitlement.ProjectEntitlements.Add(projectEntitlement);
+                }
+            }
+
+            return groupEntitlement;
+        }
+
+        #region Pipeline Operations
+
+        /// <summary>
+        /// Lista todos os pipelines de um projeto
+        /// </summary>
+        public async Task<List<Pipeline>> GetPipelinesAsync(string project)
+        {
+            var url = $"https://dev.azure.com/{_organization}/{project}/_apis/pipelines?api-version=7.2-preview.1";
+            _logger?.LogInformation("Fetching pipelines for project: {Project}", project);
+
+            var response = await _httpClient.GetStringAsync(url);
+            var json = JObject.Parse(response);
+
+            var pipelines = new List<Pipeline>();
+
+            if (json["value"] != null)
+            {
+                foreach (var item in json["value"]!)
+                {
+                    pipelines.Add(new Pipeline
+                    {
+                        Id = item["id"]?.Value<int>() ?? 0,
+                        Name = item["name"]?.ToString() ?? string.Empty,
+                        Folder = item["folder"]?.ToString(),
+                        Revision = item["revision"]?.Value<int>() ?? 0,
+                        Url = item["url"]?.ToString() ?? string.Empty
+                    });
+                }
+            }
+
+            _logger?.LogInformation("Found {Count} pipelines", pipelines.Count);
+            return pipelines;
+        }
+
+        /// <summary>
+        /// Obtém detalhes de um pipeline específico
+        /// </summary>
+        public async Task<Pipeline?> GetPipelineAsync(string project, int pipelineId)
+        {
+            var url = $"https://dev.azure.com/{_organization}/{project}/_apis/pipelines/{pipelineId}?api-version=7.2-preview.1";
+            _logger?.LogInformation("Fetching pipeline {PipelineId} from project {Project}", pipelineId, project);
+
+            try
+            {
+                var response = await _httpClient.GetStringAsync(url);
+                var json = JObject.Parse(response);
+
+                return new Pipeline
+                {
+                    Id = json["id"]?.Value<int>() ?? 0,
+                    Name = json["name"]?.ToString() ?? string.Empty,
+                    Folder = json["folder"]?.ToString(),
+                    Revision = json["revision"]?.Value<int>() ?? 0,
+                    Url = json["url"]?.ToString() ?? string.Empty
+                };
+            }
+            catch (HttpRequestException ex)
+            {
+                _logger?.LogError(ex, "Pipeline {PipelineId} not found in project {Project}", pipelineId, project);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Lista todas as execuções (runs) de um pipeline
+        /// </summary>
+        public async Task<List<PipelineRun>> GetPipelineRunsAsync(string project, int pipelineId)
+        {
+            var url = $"https://dev.azure.com/{_organization}/{project}/_apis/pipelines/{pipelineId}/runs?api-version=7.2-preview.1";
+            _logger?.LogInformation("Fetching runs for pipeline {PipelineId} in project {Project}", pipelineId, project);
+
+            var response = await _httpClient.GetStringAsync(url);
+            var json = JObject.Parse(response);
+
+            var runs = new List<PipelineRun>();
+
+            if (json["value"] != null)
+            {
+                foreach (var item in json["value"]!)
+                {
+                    runs.Add(new PipelineRun
+                    {
+                        Id = item["id"]?.Value<int>() ?? 0,
+                        Name = item["name"]?.ToString() ?? string.Empty,
+                        State = item["state"]?.ToString() ?? string.Empty,
+                        Result = item["result"]?.ToString() ?? string.Empty,
+                        CreatedDate = item["createdDate"]?.Value<DateTime>() ?? DateTime.MinValue,
+                        FinishedDate = item["finishedDate"]?.Value<DateTime?>(),
+                        Url = item["url"]?.ToString() ?? string.Empty
+                    });
+                }
+            }
+
+            _logger?.LogInformation("Found {Count} runs for pipeline {PipelineId}", runs.Count, pipelineId);
+            return runs;
+        }
+
+        /// <summary>
+        /// Obtém execuções falhadas de um pipeline em um período específico
+        /// </summary>
+        public async Task<List<PipelineRun>> GetFailedPipelineRunsAsync(
+            string project,
+            int pipelineId,
+            DateTime startDate,
+            DateTime endDate)
+        {
+            _logger?.LogInformation(
+                "Fetching failed runs for pipeline {PipelineId} between {StartDate} and {EndDate}",
+                pipelineId, startDate, endDate);
+
+            var allRuns = await GetPipelineRunsAsync(project, pipelineId);
+
+            var failedRuns = allRuns
+                .Where(r => r.Result.Equals("failed", StringComparison.OrdinalIgnoreCase) &&
+                            r.CreatedDate >= startDate &&
+                            r.CreatedDate <= endDate)
+                .OrderByDescending(r => r.CreatedDate)
+                .ToList();
+
+            _logger?.LogInformation("Found {Count} failed runs", failedRuns.Count);
+            return failedRuns;
+        }
+
+        /// <summary>
+        /// Lista todos os logs de uma execução específica
+        /// </summary>
+        public async Task<LogCollection> GetPipelineLogsAsync(string project, int pipelineId, int runId)
+        {
+            var url = $"https://dev.azure.com/{_organization}/{project}/_apis/pipelines/{pipelineId}/runs/{runId}/logs?api-version=7.2-preview.1";
+            _logger?.LogInformation("Fetching logs for run {RunId} of pipeline {PipelineId}", runId, pipelineId);
+
+            var response = await _httpClient.GetStringAsync(url);
+            var json = JObject.Parse(response);
+
+            var logCollection = new LogCollection
+            {
+                Url = json["url"]?.ToString() ?? string.Empty
+            };
+
+            if (json["logs"] != null)
+            {
+                foreach (var item in json["logs"]!)
+                {
+                    logCollection.Logs.Add(new PipelineLog
+                    {
+                        Id = item["id"]?.Value<int>() ?? 0,
+                        CreatedOn = item["createdOn"]?.Value<DateTime>() ?? DateTime.MinValue,
+                        LastChangedOn = item["lastChangedOn"]?.Value<DateTime>() ?? DateTime.MinValue,
+                        LineCount = item["lineCount"]?.Value<long>() ?? 0,
+                        Url = item["url"]?.ToString() ?? string.Empty
+                    });
+                }
+            }
+
+            _logger?.LogInformation("Found {Count} logs", logCollection.Logs.Count);
+            return logCollection;
+        }
+
+        /// <summary>
+        /// Obtém o conteúdo de um log específico
+        /// </summary>
+        public async Task<string> GetLogContentAsync(string project, int pipelineId, int runId, int logId)
+        {
+            var url = $"https://dev.azure.com/{_organization}/{project}/_apis/pipelines/{pipelineId}/runs/{runId}/logs/{logId}?api-version=7.2-preview.1";
+            _logger?.LogInformation("Fetching content of log {LogId} from run {RunId}", logId, runId);
+
+            var response = await _httpClient.GetStringAsync(url);
+            return response;
+        }
+
+        #endregion
     }
 
     #region DTOs de Auditoria
 
-    /// <summary>
-    /// Modelo de resposta do audit log
-    /// </summary>
     public class AuditLogResponse
     {
-        /// <summary>
-        /// Indica se existem mais registros disponíveis
-        /// </summary>
         public bool HasMore { get; set; }
-
-        /// <summary>
-        /// Token para buscar a próxima página de resultados
-        /// </summary>
         public string? ContinuationToken { get; set; }
-
-        /// <summary>
-        /// Lista de entradas do audit log
-        /// </summary>
         public required List<AuditEntry> DecoratedAuditLogEntries { get; set; }
-
-        /// <summary>
-        /// Número total de registros retornados
-        /// </summary>
         public int TotalCount { get; set; }
     }
 
-    /// <summary>
-    /// Entrada individual do audit log
-    /// </summary>
     public class AuditEntry
     {
         public string? Id { get; set; }
@@ -973,199 +1285,59 @@ namespace AzureDevOpsAuditAgent.Class
 
     #region DTOs de Graph (Usuários e Grupos)
 
-    /// <summary>
-    /// Representa um usuário do Azure DevOps
-    /// </summary>
     public class GraphUser
     {
-        /// <summary>
-        /// Descriptor único do usuário (usado para operações de API)
-        /// </summary>
         public string? Descriptor { get; set; }
-
-        /// <summary>
-        /// Nome de exibição do usuário
-        /// </summary>
         public string? DisplayName { get; set; }
-
-        /// <summary>
-        /// User Principal Name (UPN)
-        /// </summary>
         public string? PrincipalName { get; set; }
-
-        /// <summary>
-        /// Endereço de email
-        /// </summary>
         public string? MailAddress { get; set; }
-
-        /// <summary>
-        /// Origem do usuário (aad, vsts, etc.)
-        /// </summary>
         public string? Origin { get; set; }
-
-        /// <summary>
-        /// ID de origem
-        /// </summary>
         public string? OriginId { get; set; }
-
-        /// <summary>
-        /// Tipo de entidade (user)
-        /// </summary>
         public string? SubjectKind { get; set; }
-
-        /// <summary>
-        /// Domínio do usuário
-        /// </summary>
         public string? Domain { get; set; }
-
-        /// <summary>
-        /// Alias do diretório
-        /// </summary>
         public string? DirectoryAlias { get; set; }
     }
 
-    /// <summary>
-    /// Representa um grupo do Azure DevOps
-    /// </summary>
     public class GraphGroup
     {
-        /// <summary>
-        /// Descriptor único do grupo (usado para operações de API)
-        /// </summary>
         public string? Descriptor { get; set; }
-
-        /// <summary>
-        /// Nome de exibição do grupo
-        /// </summary>
         public string? DisplayName { get; set; }
-
-        /// <summary>
-        /// Nome principal do grupo
-        /// </summary>
         public string? PrincipalName { get; set; }
-
-        /// <summary>
-        /// Endereço de email do grupo
-        /// </summary>
         public string? MailAddress { get; set; }
-
-        /// <summary>
-        /// Origem do grupo (vsts, aad, etc.)
-        /// </summary>
         public string? Origin { get; set; }
-
-        /// <summary>
-        /// ID de origem
-        /// </summary>
         public string? OriginId { get; set; }
-
-        /// <summary>
-        /// Tipo de entidade (group)
-        /// </summary>
         public string? SubjectKind { get; set; }
-
-        /// <summary>
-        /// Domínio do grupo
-        /// </summary>
         public string? Domain { get; set; }
-
-        /// <summary>
-        /// Descrição do grupo
-        /// </summary>
         public string? Description { get; set; }
     }
 
-    /// <summary>
-    /// Representa um membro de um grupo
-    /// </summary>
     public class GraphMember
     {
-        /// <summary>
-        /// Descriptor do membro
-        /// </summary>
         public string? MemberDescriptor { get; set; }
-
-        /// <summary>
-        /// Descriptor do container (grupo)
-        /// </summary>
         public string? ContainerDescriptor { get; set; }
     }
 
-    /// <summary>
-    /// Resposta da listagem de projetos
-    /// </summary>
     public class ProjectsResponse
     {
-        /// <summary>
-        /// Número total de projetos retornados
-        /// </summary>
         public int Count { get; set; }
-
-        /// <summary>
-        /// Lista de projetos
-        /// </summary>
         public required List<AzureDevOpsProject> Projects { get; set; }
     }
 
-    /// <summary>
-    /// Representa um projeto do Azure DevOps
-    /// </summary>
     public class AzureDevOpsProject
     {
-        /// <summary>
-        /// ID único do projeto (GUID)
-        /// </summary>
         public string? Id { get; set; }
-
-        /// <summary>
-        /// Nome do projeto
-        /// </summary>
         public string? Name { get; set; }
-
-        /// <summary>
-        /// Descrição do projeto
-        /// </summary>
         public string? Description { get; set; }
-
-        /// <summary>
-        /// URL do projeto
-        /// </summary>
         public string? Url { get; set; }
-
-        /// <summary>
-        /// Estado do projeto (wellFormed, createPending, deleting, new, unchanged)
-        /// </summary>
         public string? State { get; set; }
-
-        /// <summary>
-        /// Número de revisão do projeto
-        /// </summary>
         public int Revision { get; set; }
-
-        /// <summary>
-        /// Visibilidade do projeto (private, public)
-        /// </summary>
         public string? Visibility { get; set; }
-
-        /// <summary>
-        /// Data/hora da última atualização do projeto
-        /// </summary>
         public DateTime LastUpdateTime { get; set; }
     }
 
-    /// <summary>
-    /// Representa detalhes completos de um projeto do Azure DevOps
-    /// </summary>
     public class AzureDevOpsProjectDetails : AzureDevOpsProject
     {
-        /// <summary>
-        /// URL da imagem do time padrão
-        /// </summary>
         public string? DefaultTeamImageUrl { get; set; }
-
-        /// <summary>
-        /// Capacidades do projeto (versioncontrol, processTemplate, etc.)
-        /// </summary>
         public Dictionary<string, Dictionary<string, string>>? Capabilities { get; set; }
     }
 
@@ -1173,88 +1345,102 @@ namespace AzureDevOpsAuditAgent.Class
 
     #region DTOs de Work Items
 
-    /// <summary>
-    /// Representa um Work Item do Azure DevOps
-    /// </summary>
     public class WorkItem
     {
-        /// <summary>
-        /// ID único do Work Item
-        /// </summary>
         public int Id { get; set; }
-
-        /// <summary>
-        /// Número de revisão do Work Item
-        /// </summary>
         public int Rev { get; set; }
-
-        /// <summary>
-        /// URL do Work Item
-        /// </summary>
         public string? Url { get; set; }
-
-        /// <summary>
-        /// Campos do Work Item (System.Title, System.State, etc.)
-        /// </summary>
         public required Dictionary<string, object> Fields { get; set; }
-
-        /// <summary>
-        /// Relações do Work Item (parent, child, related, etc.)
-        /// </summary>
         public List<WorkItemRelation>? Relations { get; set; }
     }
 
-    /// <summary>
-    /// Representa uma relação entre Work Items
-    /// </summary>
     public class WorkItemRelation
     {
-        /// <summary>
-        /// Tipo de relação (System.LinkTypes.Hierarchy-Forward, etc.)
-        /// </summary>
         public string? Rel { get; set; }
-
-        /// <summary>
-        /// URL do Work Item relacionado
-        /// </summary>
         public string? Url { get; set; }
-
-        /// <summary>
-        /// Atributos da relação
-        /// </summary>
         public Dictionary<string, object>? Attributes { get; set; }
     }
 
-    /// <summary>
-    /// Resultado de uma query WIQL
-    /// </summary>
     public class WorkItemQueryResult
     {
-        /// <summary>
-        /// Tipo da query (flat, tree, oneHop)
-        /// </summary>
         public string? QueryType { get; set; }
-
-        /// <summary>
-        /// Tipo do resultado
-        /// </summary>
         public string? QueryResultType { get; set; }
-
-        /// <summary>
-        /// Data/hora da query
-        /// </summary>
         public DateTime AsOf { get; set; }
-
-        /// <summary>
-        /// Lista de IDs dos Work Items encontrados
-        /// </summary>
         public required List<int> WorkItemIds { get; set; }
-
-        /// <summary>
-        /// Lista completa dos Work Items encontrados
-        /// </summary>
         public required List<WorkItem> WorkItems { get; set; }
     }
 
     #endregion
+
+    #region DTOs de Group Entitlements
+
+    public class GroupEntitlementsResponse
+    {
+        public int Count { get; set; }
+        public required List<GroupEntitlement> GroupEntitlements { get; set; }
+    }
+
+    public class GroupEntitlement
+    {
+        public string? Id { get; set; }
+        public GraphGroupDetail? Group { get; set; }
+        public AccessLevel? LicenseRule { get; set; }
+        public List<ProjectEntitlementDetail>? ProjectEntitlements { get; set; }
+        public string? Status { get; set; }
+        public DateTime? LastExecuted { get; set; }
+    }
+
+    public class GraphGroupDetail
+    {
+        public string? Descriptor { get; set; }
+        public string? DisplayName { get; set; }
+        public string? PrincipalName { get; set; }
+        public string? MailAddress { get; set; }
+        public string? Origin { get; set; }
+        public string? OriginId { get; set; }
+        public string? SubjectKind { get; set; }
+        public string? Domain { get; set; }
+        public string? Description { get; set; }
+        public string? Url { get; set; }
+    }
+
+    public class AccessLevel
+    {
+        public string? LicensingSource { get; set; }
+        public string? AccountLicenseType { get; set; }
+        public string? MsdnLicenseType { get; set; }
+        public string? LicenseDisplayName { get; set; }
+        public string? Status { get; set; }
+        public string? StatusMessage { get; set; }
+        public string? AssignmentSource { get; set; }
+    }
+
+    public class ProjectEntitlementDetail
+    {
+        public ProjectReference? ProjectRef { get; set; }
+        public ProjectGroupDetail? Group { get; set; }
+        public bool IsProjectPermissionInherited { get; set; }
+        public List<TeamReference>? TeamRefs { get; set; }
+        public string? AssignmentSource { get; set; }
+    }
+
+    public class ProjectReference
+    {
+        public string? Id { get; set; }
+        public string? Name { get; set; }
+    }
+
+    public class ProjectGroupDetail
+    {
+        public string? GroupType { get; set; }
+        public string? DisplayName { get; set; }
+    }
+
+    public class TeamReference
+    {
+        public string? Id { get; set; }
+        public string? Name { get; set; }
+    }
 }
+
+    #endregion
