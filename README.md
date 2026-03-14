@@ -1,5 +1,8 @@
 # Azure DevOps Audit Agent API
 
+## Diagram
+<img src="https://github.com/OrgWlfsouza/AzureDevOpsAuditAgent/blob/main/diagram.gif" alt="Diagram">
+** Tools used in the project and their integrations.
 
 ## 📖 Project Description
 **Azure DevOps Audit Agent API** is a solution designed to deliver **auditing, governance, and automation** within the Azure DevOps ecosystem.  
